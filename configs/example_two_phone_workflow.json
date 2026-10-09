@@ -1,0 +1,27 @@
+{
+  "name": "Example - two phone workflow",
+  "description": "Reads the phone model on phone A and types it into a new message on phone B.",
+  "steps": [
+    {"action": "open_app", "package": "com.android.settings", "device": "A"},
+    {"action": "scroll_to_text", "text": "About phone", "device": "A", "retries": 1},
+    {"action": "click", "locator_type": "text", "locator_value": "About phone", "device": "A"},
+    {"action": "copy_text", "locator_type": "id", "locator_value": "android:id/summary", "save_as": "model", "device": "A", "on_fail": "stop"},
+    {"action": "press_key", "key": "home", "device": "A"},
+    {"action": "open_app", "package": "com.google.android.apps.messaging", "device": "B"},
+    {
+      "action": "if_exists", "locator_type": "text", "locator_value": "Start chat", "timeout_seconds": 5, "device": "B",
+      "then": [
+        {"action": "click", "locator_type": "text", "locator_value": "Start chat", "device": "B"}
+      ],
+      "else": [
+        {"action": "screenshot", "name": "no start chat button", "device": "B"}
+      ]
+    },
+    {"action": "repeat", "times": 2, "steps": [
+      {"action": "swipe", "start_x": 50, "start_y": 70, "end_x": 50, "end_y": 30, "duration_ms": 300, "device": "B"}
+    ]},
+    {"action": "paste_text", "locator_type": "class name", "locator_value": "android.widget.EditText",
+     "text": "Phone A is a {{model}} (run {{run_number}}, {{date}} {{time}})", "device": "B"},
+    {"action": "screenshot", "name": "message typed", "device": "B"}
+  ]
+}

@@ -1,7 +1,9 @@
 DEVICE AUTOMATION DASHBOARD — QUICK START
 ==========================================
 
-You do NOT need to install Python. Keep this whole folder together.
+You do NOT need to install Python.
+Installed with DeviceAutomation-Setup.exe? Start it from the Start Menu.
+Got a folder instead? Keep the whole folder together and run DeviceAutomation.exe.
 
 1. Install your phone's USB driver (Windows)
    - Samsung: "Samsung Android USB Driver for Windows"
@@ -30,6 +32,22 @@ Scripts
      scroll, wait) with forms, then "Save Script".
    - Saved scripts are plain files in the "configs" folder next to the .exe.
      You can copy scripts between computers by copying that folder.
+
+More tools
+   - Element Picker: shows a live picture of the phone. Click a button to see
+     how to find it, or tick "Record clicks" and just use the app — each click
+     becomes a step.
+   - Run...: run a script several times in a row, or a "workflow" that uses
+     two phones (e.g. copy on phone A, paste on phone B).
+   - Schedules: run a script every day at a set time, or every N minutes,
+     while the app is open.
+   - Run History tab: every run with its result. "Open Report" shows each
+     step, with a screenshot of anything that failed (saved in "runs").
+
+Settings (File > Settings, or Ctrl+,)
+   - Default element timeout: how long steps wait for a button/text to appear.
+   - Log folder and "Open Logs Folder": if something goes wrong, the app shows
+     "Something went wrong — details saved to logs/..."; send that file.
 
 Troubleshooting
    - Phone not listed: re-plug the cable, check the "Allow USB debugging"

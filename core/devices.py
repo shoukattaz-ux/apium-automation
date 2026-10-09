@@ -269,15 +269,84 @@ class DeviceSession:
                 return
             time.sleep(min(0.2, remaining))
 
+    def exists(self, locator_type: str, locator_value: str, timeout_seconds: float = 3) -> bool:
+        """True if the element appears within ``timeout_seconds``."""
+        try:
+            self.find(locator_type, locator_value, timeout_seconds)
+            return True
+        except ElementNotFound:
+            return False
+
+    def close_app(self, package: str) -> None:
+        """Force-stop an app."""
+        try:
+            self._require_driver().terminate_app(package)
+        except DeviceError:
+            raise
+        except Exception as exc:
+            raise DeviceError(f"Could not close {package}: {_short_error(exc)}") from exc
+
+    def scroll_to_text(self, text: str) -> None:
+        """Scroll the first scrollable list until an item containing ``text`` is visible."""
+        from appium.webdriver.common.appiumby import AppiumBy
+
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        selector = ("new UiScrollable(new UiSelector().scrollable(true))"
+                    f'.scrollIntoView(new UiSelector().textContains("{escaped}"))')
+        try:
+            self._require_driver().find_element(AppiumBy.ANDROID_UIAUTOMATOR, selector)
+        except (DeviceError, RunStopped):
+            raise
+        except Exception as exc:
+            raise ElementNotFound(f"Could not scroll to text “{text}”") from exc
+
+    def window_size(self) -> tuple[int, int]:
+        size = self._require_driver().get_window_size()
+        return int(size["width"]), int(size["height"])
+
     def tap(self, x: int, y: int) -> None:
         """Tap absolute screen coordinates (for elements without a usable locator)."""
-        self._require_driver().tap([(x, y)])
+        self._require_driver().tap([(int(x), int(y))])
+
+    def tap_percent(self, x: float, y: float) -> None:
+        """Tap a point given as percentages of the screen size."""
+        width, height = self.window_size()
+        self.tap(width * float(x) / 100, height * float(y) / 100)
+
+    def swipe_percent(self, start_x: float, start_y: float, end_x: float, end_y: float,
+                      duration_ms: int = 400) -> None:
+        """Swipe between two points given as percentages of the screen size."""
+        width, height = self.window_size()
+        self._require_driver().swipe(int(width * float(start_x) / 100), int(height * float(start_y) / 100),
+                                     int(width * float(end_x) / 100), int(height * float(end_y) / 100),
+                                     int(duration_ms))
+
+    def press_key(self, key: str) -> None:
+        """Press a hardware/system key by name (see ``KEYCODES``)."""
+        if key not in KEYCODES:
+            raise DeviceError(f"Unknown key {key!r}")
+        self._require_driver().press_keycode(KEYCODES[key])
 
     def back(self) -> None:
-        self._require_driver().back()
+        self.press_key("back")
+
+    def screenshot_png(self) -> bytes:
+        return self._require_driver().get_screenshot_as_png()
 
     def screenshot(self, path: str) -> None:
-        self._require_driver().get_screenshot_as_file(path)
+        with open(path, "wb") as handle:
+            handle.write(self.screenshot_png())
+
+    def page_source(self) -> str:
+        """The current screen's UI hierarchy as XML (used by the element picker)."""
+        return self._require_driver().page_source
+
+
+# Android key codes for press_key / the "Press Key" step.
+KEYCODES = {
+    "back": 4, "home": 3, "enter": 66, "recent_apps": 187, "delete": 67,
+    "search": 84, "menu": 82, "volume_up": 24, "volume_down": 25,
+}
 
 
 def to_appium_locator(locator_type: str, locator_value: str) -> tuple[str, str]:
