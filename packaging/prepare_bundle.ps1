@@ -7,7 +7,10 @@
 #     powershell -ExecutionPolicy Bypass -File packaging\prepare_bundle.ps1
 
 $ErrorActionPreference = "Stop"
-$NodeVersion = "22.11.0"
+# Appium 3 needs Node ^20.19 / ^22.12 / >=24, and current UiAutomator2 drivers need Appium 3.
+# Keep these in step when upgrading.
+$NodeVersion = "22.23.3"
+$AppiumVersion = "3.8.0"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Server = Join-Path $Here "appium-server"
 $Temp = Join-Path $env:TEMP "apium-bundle"
@@ -25,8 +28,8 @@ $Npm = Join-Path $NodeDir "node_modules\npm\bin\npm-cli.js"
 $Node = Join-Path $Server "node.exe"
 
 # 2. Appium itself, installed locally into appium-server\node_modules
-Write-Host "Installing Appium..."
-& $Node $Npm install --prefix $Server --no-fund --no-audit appium
+Write-Host "Installing Appium $AppiumVersion..."
+& $Node $Npm install --prefix $Server --no-fund --no-audit "appium@$AppiumVersion"
 if ($LASTEXITCODE -ne 0) { throw "npm install appium failed" }
 
 # 3. UiAutomator2 driver, into a private APPIUM_HOME the app points at
