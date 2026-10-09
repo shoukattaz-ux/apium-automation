@@ -24,6 +24,7 @@ from core import paths
 from core.devices import DeviceError
 from core.inspector import UiElement, clickable_target, element_at, parse_page_source, suggest_locators
 
+from .qtutil import safe_emit
 from .theme import ACCENT
 
 if TYPE_CHECKING:
@@ -128,7 +129,7 @@ class InspectorWindow(QWidget):
         self.elements: list[UiElement] = []
         self.selected: UiElement | None = None
         self._busy = False
-        self.signals = _Signals()
+        self.signals = _Signals(self)  # parented: dropped with the window if a worker finishes late
         self.signals.loaded.connect(self._show_screen)
         self.signals.clicked.connect(self._after_record_click)
 
@@ -237,7 +238,7 @@ class InspectorWindow(QWidget):
         layout.addWidget(splitter, 1)
 
         if self.device_combo.count():
-            QTimer.singleShot(0, self.refresh)
+            QTimer.singleShot(0, self, self.refresh)  # context object: cancelled if the window closes
         else:
             self.screen.message = "No phones connected."
 
@@ -262,9 +263,9 @@ class InspectorWindow(QWidget):
                 session = manager.session_for(serial)
                 png = session.screenshot_png()
                 source = session.page_source()
-                self.signals.loaded.emit(png, source, "")
+                safe_emit(self.signals.loaded, png, source, "")
             except Exception as exc:  # DeviceError or a WebDriver error
-                self.signals.loaded.emit(b"", "", str(exc).splitlines()[0] if str(exc) else type(exc).__name__)
+                safe_emit(self.signals.loaded, b"", "", str(exc).splitlines()[0] if str(exc) else type(exc).__name__)
 
         threading.Thread(target=work, name="inspector", daemon=True).start()
 
@@ -394,9 +395,9 @@ class InspectorWindow(QWidget):
                     session.click(*locator, timeout_seconds=3)
                 except DeviceError:
                     session.tap(x, y)
-                self.signals.clicked.emit("")
+                safe_emit(self.signals.clicked, "")
             except Exception as exc:
-                self.signals.clicked.emit(str(exc).splitlines()[0] if str(exc) else type(exc).__name__)
+                safe_emit(self.signals.clicked, str(exc).splitlines()[0] if str(exc) else type(exc).__name__)
 
         threading.Thread(target=work, name="inspector-click", daemon=True).start()
 
@@ -405,4 +406,4 @@ class InspectorWindow(QWidget):
             self.status.setText(f"✖ Click failed: {error}")
             return
         self.status.setText("Recorded click — refreshing…")
-        QTimer.singleShot(1200, self.refresh)
+        QTimer.singleShot(1200, self, self.refresh)

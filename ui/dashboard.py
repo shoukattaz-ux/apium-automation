@@ -30,6 +30,7 @@ from core.schema import ScriptError
 from core.version import APP_NAME, APP_VERSION
 
 from .history import HistoryPanel
+from .qtutil import safe_emit
 from .run_dialog import RunDialog, RunRequest
 from .theme import STATUS_LABELS, status_dot_style
 
@@ -172,15 +173,15 @@ class MainWindow(QMainWindow):
 
         self.manager = manager or DeviceManager()
         self.schedules = schedules or ScheduleStore()
-        self.bridge = Bridge()
+        self.bridge = Bridge(self)  # parented: destroyed with the window, so late signals are dropped
         self.bridge.log.connect(self._append_log)
         self.bridge.status.connect(self._apply_status)
         self.bridge.devices_scanned.connect(self._apply_scan)
         self.bridge.appium_checked.connect(self._apply_appium_state)
         self.bridge.run_finished.connect(lambda _: self.history.reload())
-        self.manager.add_log_listener(lambda serial, msg: self.bridge.log.emit(serial, msg))
-        self.manager.status.subscribe(lambda serial, entry: self.bridge.status.emit(serial, entry))
-        self.manager.add_finished_listener(lambda serials, results: self.bridge.run_finished.emit(serials))
+        self.manager.add_log_listener(lambda serial, msg: safe_emit(self.bridge.log, serial, msg))
+        self.manager.status.subscribe(lambda serial, entry: safe_emit(self.bridge.status, serial, entry))
+        self.manager.add_finished_listener(lambda serials, results: safe_emit(self.bridge.run_finished, serials))
 
         self.rows: dict[str, DeviceRow] = {}
         self.logs: dict[str, list[str]] = {}
@@ -387,11 +388,11 @@ class MainWindow(QMainWindow):
             try:
                 serials = list_connected_devices()
                 models = {s: device_model(s) for s in serials if s not in known}
-                self.bridge.devices_scanned.emit(serials, models, "")
+                safe_emit(self.bridge.devices_scanned, serials, models, "")
             except DeviceError as exc:
-                self.bridge.devices_scanned.emit([], {}, str(exc))
+                safe_emit(self.bridge.devices_scanned, [], {}, str(exc))
             except Exception as exc:  # keep polling even if something odd happens
-                self.bridge.devices_scanned.emit([], {}, f"Device scan failed: {exc}")
+                safe_emit(self.bridge.devices_scanned, [], {}, f"Device scan failed: {exc}")
 
         threading.Thread(target=work, name="device-scan", daemon=True).start()
 
@@ -751,7 +752,7 @@ class MainWindow(QMainWindow):
 
     def check_appium(self) -> None:
         url = self.manager.appium_url
-        threading.Thread(target=lambda: self.bridge.appium_checked.emit(is_server_running(url)),
+        threading.Thread(target=lambda: safe_emit(self.bridge.appium_checked, is_server_running(url)),
                          daemon=True).start()
 
     def _apply_appium_state(self, running: bool) -> None:

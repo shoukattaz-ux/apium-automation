@@ -37,6 +37,7 @@ from core.schema import (
 )
 
 from .highlighter import PythonHighlighter
+from .qtutil import safe_emit
 
 if TYPE_CHECKING:
     from .dashboard import MainWindow
@@ -78,7 +79,7 @@ class PackagePickerDialog(QDialog):
         self.setWindowTitle("Pick an app from a connected device")
         self.resize(460, 520)
         self.devices = devices
-        self._signals = _PackagesLoaded()
+        self._signals = _PackagesLoaded(self)
         self._signals.done.connect(self._show_packages)
         self._packages: list[str] = []
 
@@ -122,9 +123,9 @@ class PackagePickerDialog(QDialog):
 
         def work() -> None:
             try:
-                self._signals.done.emit(list_installed_packages(serial, third_party_only), "")
+                safe_emit(self._signals.done, list_installed_packages(serial, third_party_only), "")
             except DeviceError as exc:
-                self._signals.done.emit([], str(exc))
+                safe_emit(self._signals.done, [], str(exc))
 
         threading.Thread(target=work, daemon=True).start()
 

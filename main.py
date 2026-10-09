@@ -170,6 +170,7 @@ def run_gui(appium_url: str) -> int:
     from core.scheduler import ScheduleStore
     from ui.dashboard import MainWindow
     from ui.errors import show_error_dialog
+    from ui.qtutil import close_all_windows
     from ui.splash import SplashScreen
     from ui.theme import apply_theme
 
@@ -202,6 +203,7 @@ def run_gui(appium_url: str) -> int:
     try:
         return app.exec()
     finally:
+        close_all_windows(app)  # finish pending deletes before Python tears Qt down
         if server:
             server.stop()
         log.info("%s closed", APP_NAME)
