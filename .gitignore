@@ -8,3 +8,5 @@ dist/
 logs/
 packaging/appium-server/
 packaging/platform-tools/
+runs/
+configs/schedules.json

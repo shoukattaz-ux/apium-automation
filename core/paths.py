@@ -46,6 +46,15 @@ def logs_dir() -> Path:
     return app_dir() / "logs"
 
 
+def runs_dir() -> Path:
+    """Run history: one folder per run with its report and screenshots."""
+    return app_dir() / "runs"
+
+
+def schedules_file() -> Path:
+    return configs_dir() / "schedules.json"
+
+
 def icon_path() -> Path:
     return resource_dir() / "assets" / "icon.png"
 

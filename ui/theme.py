@@ -18,6 +18,7 @@ STATUS_COLORS = {
     RunState.IDLE: "#7b818c",
     RunState.CONNECTING: "#a78bfa",
     RunState.RUNNING: "#3b82f6",
+    RunState.WAITING: "#38bdf8",
     RunState.COMPLETED: "#22c55e",
     RunState.PARTIAL: "#f59e0b",
     RunState.FAILED: "#ef4444",
@@ -29,6 +30,7 @@ STATUS_LABELS = {
     RunState.IDLE: "Idle",
     RunState.CONNECTING: "Connecting…",
     RunState.RUNNING: "Running",
+    RunState.WAITING: "Waiting for next run",
     RunState.COMPLETED: "Done",
     RunState.PARTIAL: "Done (some steps skipped)",
     RunState.FAILED: "Failed",
@@ -130,6 +132,35 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {ACCENT}; }}
 QSplitter::handle {{ background: transparent; width: 10px; }}
+QFrame#StepCard[depth="1"] {{ background: #20242e; }}
+QFrame#StepCard[depth="2"] {{ background: #262b36; }}
+QLabel#Badge {{
+    background: #24324a; color: #93c5fd; border-radius: 8px; padding: 1px 8px; font-size: 8.5pt; font-weight: 600;
+}}
+QLabel#BlockTitle {{ background: transparent; color: {TEXT_MUTED}; font-weight: 600; font-size: 9pt; }}
+QPushButton#Ghost {{ background: transparent; border: 1px dashed {BORDER}; color: {TEXT_MUTED}; padding: 4px 12px; }}
+QPushButton#Ghost:hover {{ color: {TEXT}; border-color: {TEXT_MUTED}; }}
+QGroupBox {{
+    border: 1px solid {BORDER}; border-radius: 8px; margin-top: 14px; padding: 12px 8px 6px 8px;
+}}
+QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 4px; color: {TEXT_MUTED}; }}
+QTableWidget {{
+    background: {BG}; border: 1px solid {BORDER}; border-radius: 8px; gridline-color: {BORDER};
+    selection-background-color: #24324a; selection-color: {TEXT};
+}}
+QTableWidget::item {{ padding: 4px 8px; }}
+QHeaderView::section {{
+    background: {SURFACE}; color: {TEXT_MUTED}; border: none; border-bottom: 1px solid {BORDER};
+    padding: 6px 8px; font-weight: 600;
+}}
+QTimeEdit {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 6px; padding: 5px 8px; }}
+QCheckBox {{ background: transparent; spacing: 6px; }}
+QCheckBox::indicator, QTableWidget::indicator {{
+    width: 15px; height: 15px; border: 1px solid {TEXT_MUTED}; border-radius: 4px; background: {BG};
+}}
+QCheckBox::indicator:checked, QTableWidget::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: {BORDER}; border-radius: 4px; min-width: 30px; }}
 QToolTip {{ background: {SURFACE_ALT}; color: {TEXT}; border: 1px solid {BORDER}; padding: 4px; }}
 """
 

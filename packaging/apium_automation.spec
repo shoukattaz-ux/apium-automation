@@ -67,7 +67,8 @@ coll = COLLECT(exe, a.binaries, a.datas, name=APP, upx=False)
 
 # ---- Files that live next to the .exe, outside the frozen bundle -------------
 dist_dir = os.path.join(DISTPATH, APP)
-shutil.copytree(os.path.join(ROOT, "configs"), os.path.join(dist_dir, "configs"), dirs_exist_ok=True)
+shutil.copytree(os.path.join(ROOT, "configs"), os.path.join(dist_dir, "configs"), dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("schedules.json", "__pycache__"))
 shutil.copyfile(os.path.join(ROOT, "packaging", "README_FOR_USERS.txt"), os.path.join(dist_dir, "README.txt"))
 for optional in ("appium-server", "platform-tools"):
     source = os.path.join(ROOT, "packaging", optional)

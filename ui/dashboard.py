@@ -1,39 +1,50 @@
-"""Phase 3: the main dashboard — device list, per-device script picker, Start/Stop, live logs."""
+"""The main dashboard: phones, per-phone script picker, Start/Stop, live logs and run history.
+
+Also the hub for the other windows: script editor, Run dialog (repeats and
+cross-phone workflows), element picker and schedules.
+"""
 
 from __future__ import annotations
 
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QIcon
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPlainTextEdit,
-    QPushButton, QScrollArea, QSizePolicy, QSplitter, QStatusBar, QToolBar, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPlainTextEdit,
+    QPushButton, QScrollArea, QSizePolicy, QSplitter, QStatusBar, QTabWidget, QToolBar, QVBoxLayout, QWidget,
 )
 
 from core import paths
 from core.appium_server import is_server_running
 from core.devices import DeviceError, device_model, list_connected_devices
-from core.library import ScriptEntry, list_scripts
+from core.library import ScriptEntry, list_scripts, resolve_script
 from core.manager import DeviceManager
-from core.runner import PythonScript, RunState, load_any_script
+from core.runner import PythonScript, RunState, load_any_script, needs_role_mapping, roles_of, script_name
+from core.scheduler import Schedule, ScheduleStore
 from core.schema import ScriptError
 
+from .history import HistoryPanel
+from .run_dialog import RunDialog, RunRequest
 from .theme import STATUS_LABELS, status_dot_style
 
 SCAN_INTERVAL_MS = 4000
+SCHEDULE_INTERVAL_MS = 15000
 MAX_LOG_LINES = 5000
+ACTIVE_STATES = (RunState.RUNNING, RunState.CONNECTING, RunState.WAITING)
 
 
 class Bridge(QObject):
     """Carries updates from background threads to the UI thread (queued signals)."""
 
-    log = Signal(str, str)                  # serial, message
-    status = Signal(str, dict)              # serial, status entry
+    log = Signal(str, str)                     # serial, message
+    status = Signal(str, dict)                 # serial, status entry
     devices_scanned = Signal(list, dict, str)  # serials, {serial: model}, error
     appium_checked = Signal(bool)
+    run_finished = Signal(list)                # serials
 
 
 class DeviceRow(QFrame):
@@ -47,6 +58,7 @@ class DeviceRow(QFrame):
         super().__init__(parent)
         self.serial = serial
         self.connected = True
+        self.state = RunState.IDLE
         self.setObjectName("DeviceRow")
         self.setCursor(Qt.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -110,18 +122,24 @@ class DeviceRow(QFrame):
         else:
             self.set_state(RunState.IDLE, "")
 
-    def set_state(self, state: str, message: str, step: int = 0, total: int = 0) -> None:
+    def set_state(self, state: str, message: str, step: int = 0, total: int = 0,
+                  run_number: int = 1, partners: list[str] | None = None) -> None:
         self.state = state
         self.dot.setStyleSheet(status_dot_style(state))
         text = STATUS_LABELS.get(state, state)
         if state == RunState.RUNNING and total:
             text = f"Running {step}/{total}"
+        if state == RunState.RUNNING and run_number > 1:
+            text += f" · run #{run_number}"
+        others = [p for p in (partners or []) if p != self.serial]
+        if state in ACTIVE_STATES and others:
+            text += f" · with {', '.join(others)}"
         self.state_label.setText(text)
         self.setToolTip(message or text)
-        running = state in (RunState.RUNNING, RunState.CONNECTING)
-        self.start_button.setEnabled(self.connected and not running and self.script_combo.count() > 0)
-        self.stop_button.setEnabled(running)
-        self.script_combo.setEnabled(not running)
+        active = state in ACTIVE_STATES
+        self.start_button.setEnabled(self.connected and not active and self.script_combo.count() > 0)
+        self.stop_button.setEnabled(active)
+        self.script_combo.setEnabled(not active)
 
     def set_scripts(self, entries: list[ScriptEntry]) -> None:
         current = self.script_combo.currentData()
@@ -140,28 +158,32 @@ class DeviceRow(QFrame):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, manager: DeviceManager | None = None, scan_devices: bool = True):
+    def __init__(self, manager: DeviceManager | None = None, scan_devices: bool = True,
+                 schedules: ScheduleStore | None = None):
         super().__init__()
         self.setWindowTitle("Device Automation Dashboard")
         if paths.icon_path().exists():
             self.setWindowIcon(QIcon(str(paths.icon_path())))
-        self.resize(1180, 720)
+        self.resize(1240, 760)
 
         self.manager = manager or DeviceManager()
+        self.schedules = schedules or ScheduleStore()
         self.bridge = Bridge()
         self.bridge.log.connect(self._append_log)
         self.bridge.status.connect(self._apply_status)
         self.bridge.devices_scanned.connect(self._apply_scan)
         self.bridge.appium_checked.connect(self._apply_appium_state)
+        self.bridge.run_finished.connect(lambda _: self.history.reload())
         self.manager.add_log_listener(lambda serial, msg: self.bridge.log.emit(serial, msg))
         self.manager.status.subscribe(lambda serial, entry: self.bridge.status.emit(serial, entry))
+        self.manager.add_finished_listener(lambda serials, results: self.bridge.run_finished.emit(serials))
 
         self.rows: dict[str, DeviceRow] = {}
         self.logs: dict[str, list[str]] = {}
         self.selected_serial: str | None = None
         self.scripts: list[ScriptEntry] = []
         self._scan_in_progress = False
-        self._editor_windows: list[QWidget] = []
+        self._windows: list[QWidget] = []
 
         self._build_toolbar()
         self._build_body()
@@ -171,9 +193,14 @@ class MainWindow(QMainWindow):
         self.scan_timer = QTimer(self)
         self.scan_timer.setInterval(SCAN_INTERVAL_MS)
         self.scan_timer.timeout.connect(self.scan_devices)
+        self.schedule_timer = QTimer(self)
+        self.schedule_timer.setInterval(SCHEDULE_INTERVAL_MS)
+        self.schedule_timer.timeout.connect(self.check_schedules)
         if scan_devices:
             self.scan_devices()
             self.scan_timer.start()
+            self.schedule_timer.start()
+        self._update_schedule_label()
 
     # ------------------------------------------------------------------ layout
 
@@ -182,25 +209,31 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        def action(text: str, tip: str, slot) -> QAction:
+        def action(text: str, tip: str, slot, shortcut: str | None = None) -> QAction:
             act = QAction(text, self)
-            act.setToolTip(tip)
-            act.triggered.connect(slot)
+            act.setToolTip(tip + (f"  ({shortcut})" if shortcut else ""))
+            if shortcut:
+                act.setShortcut(QKeySequence(shortcut))
+            act.triggered.connect(lambda _=False: slot())
             toolbar.addAction(act)
             return act
 
-        action("⟳  Add New Device", "Re-scan USB for connected phones", self.scan_devices)
-        action("📁  Open Config Folder", "Open the folder that holds saved scripts", self.open_config_folder)
+        action("⟳  Add New Device", "Re-scan USB for connected phones", self.scan_devices, "F5")
+        action("📁  Configs", "Open the folder that holds saved scripts", self.open_config_folder)
         toolbar.addSeparator()
-        action("＋  New Script", "Create a script with the form builder or in Python",
-               lambda: self.new_script())
-        action("✎  Edit Script…", "Open a saved script in the builder", self.edit_script)
+        action("＋  New Script", "Create a script with the form builder or in Python", self.new_script, "Ctrl+N")
+        action("✎  Edit Script…", "Open a saved script in the builder", self.edit_script, "Ctrl+O")
+        action("◎  Element Picker", "Inspect a phone screen, pick elements and record steps", self.open_inspector,
+               "Ctrl+I")
         toolbar.addSeparator()
-        action("▶  Start All", "Start the selected script on every idle device", self.start_all)
-        action("■  Stop All", "Stop every running device", self.stop_all)
+        action("▶  Run…", "Run a script on chosen phones — repeats and cross-phone workflows", self.open_run_dialog,
+               "Ctrl+R")
+        action("▶▶  Start All", "Start each idle phone's selected script", self.start_all)
+        action("■  Stop All", "Stop every running phone", self.stop_all, "Ctrl+.")
+        toolbar.addSeparator()
+        action("⏱  Schedules", "Run scripts automatically at set times", self.open_schedules)
 
     def _build_body(self) -> None:
-        # Left: devices
         devices_panel = QFrame()
         devices_panel.setObjectName("Panel")
         devices_layout = QVBoxLayout(devices_panel)
@@ -231,12 +264,11 @@ class MainWindow(QMainWindow):
         scroll.setWidget(self.rows_container)
         devices_layout.addWidget(scroll, 1)
 
-        # Right: log
-        log_panel = QFrame()
-        log_panel.setObjectName("Panel")
-        log_layout = QVBoxLayout(log_panel)
-        log_layout.setContentsMargins(14, 14, 14, 14)
-        log_layout.setSpacing(10)
+        # Right: tabs with the live log and the run history
+        log_tab = QWidget()
+        log_layout = QVBoxLayout(log_tab)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(8)
         log_header = QHBoxLayout()
         self.log_title = QLabel("Log")
         self.log_title.setObjectName("PanelTitle")
@@ -257,12 +289,23 @@ class MainWindow(QMainWindow):
         self.log_view.setMaximumBlockCount(MAX_LOG_LINES)
         log_layout.addWidget(self.log_view, 1)
 
+        self.history = HistoryPanel()
+        self.tabs = QTabWidget()
+        self.tabs.addTab(log_tab, "Live Log")
+        self.tabs.addTab(self.history, "Run History")
+        right = QFrame()
+        right.setObjectName("Panel")
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+        right_layout.addWidget(self.tabs)
+        self.tabs.currentChanged.connect(lambda i: self.history.reload() if i == 1 else None)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(devices_panel)
-        splitter.addWidget(log_panel)
+        splitter.addWidget(right)
         splitter.setStretchFactor(0, 5)
-        splitter.setStretchFactor(1, 6)
-        splitter.setSizes([520, 640])
+        splitter.setStretchFactor(1, 7)
+        splitter.setSizes([500, 720])
 
         body = QWidget()
         body_layout = QVBoxLayout(body)
@@ -273,6 +316,8 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self) -> None:
         bar = QStatusBar()
         self.setStatusBar(bar)
+        self.schedule_label = QLabel("")
+        bar.addPermanentWidget(self.schedule_label)
         self.appium_label = QLabel("Appium: checking…")
         bar.addPermanentWidget(self.appium_label)
         self.appium_timer = QTimer(self)
@@ -312,15 +357,15 @@ class MainWindow(QMainWindow):
             row = self.rows.get(serial)
             if row is None:
                 self._add_row(serial, models.get(serial, serial))
-                self._log_line(serial, f"Device connected: {models.get(serial, serial)} ({serial})")
+                self._append_log(serial, f"Device connected: {models.get(serial, serial)} ({serial})")
             elif not row.connected:
                 row.set_connected(True)
-                self._log_line(serial, "Device reconnected")
+                self._append_log(serial, "Device reconnected")
         for serial, row in self.rows.items():
             if serial not in present and row.connected and not error:
                 row.set_connected(False)
                 self.manager.device_removed(serial)
-                self._log_line(serial, "Device disconnected")
+                self._append_log(serial, "Device disconnected")
         connected = sum(1 for r in self.rows.values() if r.connected)
         self.device_count.setText(f"{connected} connected")
         self.empty_label.setVisible(not self.rows)
@@ -350,7 +395,20 @@ class MainWindow(QMainWindow):
         """(serial, display name) for phones currently plugged in."""
         return [(s, r.name.text()) for s, r in self.rows.items() if r.connected]
 
+    def busy_serials(self) -> set[str]:
+        return set(self.manager.running_serials())
+
     # ------------------------------------------------------------------ running
+
+    def _appium_ready(self, quiet: bool = False) -> bool:
+        if is_server_running(self.manager.appium_url):
+            return True
+        if not quiet:
+            QMessageBox.warning(self, "Appium is not running",
+                                "The Appium server isn't running, so the phones can't be controlled.\n\n"
+                                "Start Appium (or restart this app to have it start Appium for you) "
+                                "and try again.")
+        return False
 
     def start_device(self, serial: str) -> None:
         row = self.rows.get(serial)
@@ -365,25 +423,78 @@ class MainWindow(QMainWindow):
         except ScriptError as exc:
             QMessageBox.warning(self, "Script problem", str(exc))
             return
+        if needs_role_mapping(script):
+            # A cross-phone workflow needs a phone for each role: ask, starting from this phone.
+            self.open_run_dialog(path, serial)
+            return
         self.run_script(serial, script)
 
-    def run_script(self, serial: str, script) -> bool:
-        """Start an already-loaded script (JSON dict or PythonScript) on one device."""
+    def run_script(self, serial: str, script, *, repeat: int = 1, delay_seconds: float = 0,
+                   trigger: str = "manual", quiet: bool = False) -> bool:
+        """Start an already-loaded single-phone script (JSON dict or PythonScript) on one phone."""
         if serial not in self.rows or not self.rows[serial].connected:
-            QMessageBox.warning(self, "Device not available", f"{serial} is not connected.")
+            if not quiet:
+                QMessageBox.warning(self, "Device not available", f"{serial} is not connected.")
             return False
-        if not is_server_running(self.manager.appium_url):
-            QMessageBox.warning(self, "Appium is not running",
-                                "The Appium server isn't running, so the phone can't be controlled.\n\n"
-                                "Start Appium (or restart this app to have it start Appium for you) "
-                                "and try again.")
+        if not self._appium_ready(quiet):
             return False
-        if not self.manager.start(serial, script):
+        if not self.manager.start(serial, script, repeat=repeat, delay_seconds=delay_seconds, trigger=trigger):
             self.statusBar().showMessage(f"{serial} is already running a script", 5000)
             return False
         if self.selected_serial is None:
             self.select_device(serial)
         return True
+
+    def run_workflow(self, mapping: dict[str, str], script, *, repeat: int = 1, delay_seconds: float = 0,
+                     trigger: str = "manual", quiet: bool = False) -> bool:
+        missing = [s for s in mapping.values() if s not in self.rows or not self.rows[s].connected]
+        if missing:
+            if not quiet:
+                QMessageBox.warning(self, "Phone not available", f"Not connected: {', '.join(missing)}")
+            return False
+        if not self._appium_ready(quiet):
+            return False
+        try:
+            started = self.manager.start_workflow(mapping, script, repeat=repeat, delay_seconds=delay_seconds,
+                                                  trigger=trigger)
+        except ScriptError as exc:
+            if not quiet:
+                QMessageBox.warning(self, "Can't start workflow", str(exc))
+            return False
+        if not started:
+            self.statusBar().showMessage("One of those phones is busy", 5000)
+            return False
+        self.select_device(next(iter(mapping.values())))
+        return True
+
+    def execute(self, request: RunRequest, trigger: str = "manual", quiet: bool = False) -> int:
+        """Start a RunRequest; returns how many runs started."""
+        try:
+            script = load_any_script(request.path)
+        except ScriptError as exc:
+            if not quiet:
+                QMessageBox.warning(self, "Script problem", str(exc))
+            return 0
+        if request.mapping:
+            return int(self.run_workflow(request.mapping, script, repeat=request.repeat,
+                                         delay_seconds=request.delay_seconds, trigger=trigger, quiet=quiet))
+        started = 0
+        for serial in request.serials:
+            if self.run_script(serial, script, repeat=request.repeat, delay_seconds=request.delay_seconds,
+                               trigger=trigger, quiet=quiet or started > 0):
+                started += 1
+        return started
+
+    def open_run_dialog(self, path: Path | None = None, serial: str | None = None) -> None:
+        self.reload_scripts()
+        if path is None and serial is None and self.selected_serial in self.rows:
+            path = self.rows[self.selected_serial].selected_script_path()
+            serial = self.selected_serial
+        dialog = RunDialog(self, self.scripts, self.connected_devices(), self.busy_serials(), path, serial)
+        if dialog.exec() == QDialog.Accepted and dialog.result_request:
+            started = self.execute(dialog.result_request)
+            if started:
+                self.statusBar().showMessage(f"Started {dialog.result_request.entry.name}", 4000)
 
     def run_python_source(self, serial: str, source: str, name: str) -> bool:
         """Entry point used by Developer Mode's “Run on this device”."""
@@ -393,18 +504,25 @@ class MainWindow(QMainWindow):
         return ok
 
     def start_all(self) -> None:
-        started = 0
+        started = skipped = 0
         for serial, row in self.rows.items():
-            if row.connected and not self.manager.is_running(serial) and row.selected_script_path():
-                try:
-                    script = load_any_script(row.selected_script_path())
-                except ScriptError as exc:
-                    self._log_line(serial, f"✖ {exc}")
-                    continue
-                if not self.run_script(serial, script):
-                    return
-                started += 1
-        self.statusBar().showMessage(f"Started {started} device(s)", 4000)
+            if not row.connected or self.manager.is_running(serial) or not row.selected_script_path():
+                continue
+            try:
+                script = load_any_script(row.selected_script_path())
+            except ScriptError as exc:
+                self._append_log(serial, f"✖ {exc}")
+                continue
+            if needs_role_mapping(script):
+                self._append_log(serial, f"Skipped “{script_name(script)}”: it's a cross-phone workflow — "
+                                         "use Run… to choose its phones")
+                skipped += 1
+                continue
+            if not self.run_script(serial, script):
+                return
+            started += 1
+        note = f" ({skipped} workflow(s) skipped — use Run…)" if skipped else ""
+        self.statusBar().showMessage(f"Started {started} device(s){note}", 5000)
 
     def stop_all(self) -> None:
         self.manager.stop_all()
@@ -414,12 +532,71 @@ class MainWindow(QMainWindow):
         if row is None or not row.connected:
             return
         row.set_state(entry.get("state", RunState.IDLE), entry.get("message", ""),
-                      entry.get("step", 0), entry.get("total_steps", 0))
+                      entry.get("step", 0), entry.get("total_steps", 0), entry.get("run_number", 1),
+                      entry.get("partners"))
+
+    # ------------------------------------------------------------------ schedules
+
+    def open_schedules(self) -> None:
+        from .schedules import SchedulesDialog
+
+        SchedulesDialog(self, self.schedules).exec()
+        self._update_schedule_label()
+
+    def check_schedules(self) -> None:
+        for schedule in self.schedules.due():
+            self.run_schedule(schedule)
+        self._update_schedule_label()
+
+    def run_schedule(self, schedule: Schedule) -> int:
+        """Start a scheduled run now. Busy or missing phones are skipped and logged."""
+        self.schedules.mark_run(schedule)
+        trigger = f"schedule: {schedule.name}"
+        path = resolve_script(schedule.script)
+        try:
+            script = load_any_script(path)
+        except ScriptError as exc:
+            self.statusBar().showMessage(f"Schedule “{schedule.name}”: {exc}", 10000)
+            return 0
+        targets = list(schedule.roles.values()) or list(schedule.serials)
+        if schedule.roles and set(schedule.roles) != set(roles_of(script)):
+            self.statusBar().showMessage(f"Schedule “{schedule.name}”: the script's phone roles changed — "
+                                         "edit the schedule", 10000)
+            return 0
+
+        def unavailable(serial: str) -> str:
+            if serial not in self.rows or not self.rows[serial].connected:
+                return "phone not connected"
+            return "phone is busy" if self.manager.is_running(serial) else ""
+
+        problems = {serial: unavailable(serial) for serial in targets}
+        for serial, reason in problems.items():
+            if reason:
+                self._append_log(serial, f"⏱ Schedule “{schedule.name}” skipped: {reason}")
+        options = dict(repeat=schedule.repeat, delay_seconds=schedule.delay_seconds, trigger=trigger, quiet=True)
+        started_on: list[str] = []
+        if schedule.roles:
+            if not any(problems.values()) and self.run_workflow(schedule.roles, script, **options):
+                started_on = targets
+        else:
+            started_on = [s for s in targets if not problems[s] and self.run_script(s, script, **options)]
+        for serial in started_on:
+            self._append_log(serial, f"⏱ Started by schedule “{schedule.name}”")
+        self.statusBar().showMessage(f"Schedule “{schedule.name}”: started on {len(started_on)} phone(s)", 6000)
+        return len(started_on)
+
+    def _update_schedule_label(self) -> None:
+        now = datetime.now()
+        upcoming = [(s.next_run(now), s) for s in self.schedules.schedules]
+        upcoming = [(when, s) for when, s in upcoming if when]
+        if not upcoming:
+            self.schedule_label.setText("")
+            return
+        when, schedule = min(upcoming, key=lambda pair: pair[0])
+        stamp = when.strftime("%H:%M") if when.date() == now.date() else when.strftime("%a %H:%M")
+        self.schedule_label.setText(f"⏱ Next: {schedule.name} at {stamp}   ")
 
     # ------------------------------------------------------------------ logs
-
-    def _log_line(self, serial: str, message: str) -> None:
-        self._append_log(serial, message)
 
     def _append_log(self, serial: str, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -445,7 +622,13 @@ class MainWindow(QMainWindow):
         if target:
             Path(target).write_text("\n".join(self.logs.get(self.selected_serial, [])) + "\n", encoding="utf-8")
 
-    # ------------------------------------------------------------------ scripts
+    # ------------------------------------------------------------------ windows
+
+    def _track(self, window: QWidget) -> QWidget:
+        self._windows.append(window)
+        window.destroyed.connect(lambda *_: self._windows.remove(window) if window in self._windows else None)
+        window.show()
+        return window
 
     def reload_scripts(self) -> None:
         self.scripts = list_scripts()
@@ -456,21 +639,33 @@ class MainWindow(QMainWindow):
         paths.configs_dir().mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths.configs_dir())))
 
-    def new_script(self, path: Path | None = None) -> None:
+    def new_script(self, path: Path | None = None):
         from .script_editor import ScriptEditorWindow
 
         window = ScriptEditorWindow(self, script_path=path)
         window.saved.connect(lambda _: self.reload_scripts())
-        window.destroyed.connect(lambda *_: self._editor_windows.remove(window)
-                                 if window in self._editor_windows else None)
-        self._editor_windows.append(window)
-        window.show()
+        return self._track(window)
 
     def edit_script(self) -> None:
         target, _ = QFileDialog.getOpenFileName(self, "Open script", str(paths.configs_dir()),
                                                 "Scripts (*.json *.py)")
         if target:
             self.new_script(Path(target))
+
+    def open_inspector(self, add_steps: Callable[[list[dict]], None] | None = None,
+                       on_pick: Callable[[str, str], None] | None = None, roles: list[str] | None = None):
+        from .inspector import InspectorWindow
+
+        if not self.connected_devices():
+            QMessageBox.information(self, "No phones", "Connect a phone first to inspect its screen.")
+            return None
+        if add_steps is None and on_pick is None:
+            # Opened from the toolbar: send picked steps to a new builder window.
+            editor = self.new_script()
+            add_steps = editor.builder.append_steps
+        idle = [s for s, _ in self.connected_devices() if not self.manager.is_running(s)]
+        serial = self.selected_serial if self.selected_serial in idle else (idle[0] if idle else None)
+        return self._track(InspectorWindow(self, add_steps=add_steps, on_pick=on_pick, roles=roles, serial=serial))
 
     # ------------------------------------------------------------------ appium
 
@@ -498,7 +693,9 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.Yes:
                 event.ignore()
                 return
-        self.scan_timer.stop()
-        self.appium_timer.stop()
+        for timer in (self.scan_timer, self.schedule_timer, self.appium_timer):
+            timer.stop()
+        for window in list(self._windows):
+            window.close()
         self.manager.shutdown()
         super().closeEvent(event)

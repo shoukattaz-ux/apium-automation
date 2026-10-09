@@ -3,7 +3,8 @@
     python main.py                       # open the dashboard
     python main.py --list-devices        # print connected phones and exit
     python main.py --run configs/x.json  # run a script on every phone, no UI
-    python main.py --run x.json --devices SERIAL1,SERIAL2
+    python main.py --run x.json --devices SERIAL1,SERIAL2 --repeat 5 --delay 30
+    python main.py --run workflow.json --roles A=SERIAL1,B=SERIAL2
 """
 
 from __future__ import annotations
@@ -47,30 +48,61 @@ def cli_list_devices(appium_url: str) -> int:
     return 0
 
 
-def cli_run(script_path: str, device_filter: str | None, appium_url: str) -> int:
-    from core.devices import connect_all_devices
-    from core.runner import RunState, run_script_on_devices
+def cli_run(script_path: str, device_filter: str | None, roles: str | None, repeat: int,
+            delay: float, appium_url: str) -> int:
+    """Run a script without the UI (with run history), on all/chosen phones or as a workflow."""
+    import time
 
-    sessions = connect_all_devices(appium_url)
-    if device_filter:
-        wanted = {s.strip() for s in device_filter.split(",") if s.strip()}
-        sessions = {k: v for k, v in sessions.items() if k in wanted}
-    if not sessions:
-        print("No devices to run on.")
-        return 1
-    handle = run_script_on_devices(script_path, sessions, on_log=lambda s, m: print(f"[{s}] {m}"))
+    from core.devices import DeviceError, list_connected_devices
+    from core.manager import DeviceManager
+    from core.runner import RunState, load_any_script, needs_role_mapping, roles_of
+    from core.schema import ScriptError
+
     try:
-        while handle.is_running():
-            handle.join(timeout=0.5)
+        script = load_any_script(script_path)
+    except ScriptError as exc:
+        print(exc)
+        return 2
+    manager = DeviceManager(appium_url)
+    manager.add_log_listener(lambda serial, message: print(f"[{serial}] {message}"))
+    results = []
+    manager.add_finished_listener(lambda serials, run_results: results.extend(run_results))
+    try:
+        if needs_role_mapping(script):
+            if not roles:
+                print(f"This script uses several phones; pass --roles "
+                      f"{','.join(f'{r}=SERIAL' for r in roles_of(script))}")
+                return 2
+            mapping = dict(part.split("=", 1) for part in roles.split(",") if "=" in part)
+            started = manager.start_workflow(mapping, script, repeat=repeat, delay_seconds=delay, trigger="cli")
+        else:
+            try:
+                serials = ([s.strip() for s in device_filter.split(",") if s.strip()] if device_filter
+                           else list_connected_devices())
+            except DeviceError as exc:
+                print(exc)
+                return 1
+            if not serials:
+                print("No devices to run on.")
+                return 1
+            started = all([manager.start(s, script, repeat=repeat, delay_seconds=delay, trigger="cli")
+                           for s in serials])
+    except ScriptError as exc:
+        print(exc)
+        return 2
+    if not started:
+        print("Could not start on every phone.")
+    try:
+        while manager.running_serials():
+            time.sleep(0.3)
     except KeyboardInterrupt:
         print("Stopping…")
-        handle.stop()
-        handle.join()
+        manager.stop_all()
+        while manager.running_serials():
+            time.sleep(0.2)
     finally:
-        for session in sessions.values():
-            session.close()
-    failed = [s for s, r in handle.results.items() if r.state == RunState.FAILED]
-    return 1 if failed else 0
+        manager.shutdown()
+    return 1 if any(r.state == RunState.FAILED for r in results) else 0
 
 
 # --------------------------------------------------------------------- GUI
@@ -152,6 +184,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list-devices", action="store_true", help="connect to all phones and exit")
     parser.add_argument("--run", metavar="SCRIPT", help="run a .json or .py script without the UI")
     parser.add_argument("--devices", help="comma-separated serials for --run (default: all)")
+    parser.add_argument("--roles", help="phones for a cross-phone workflow, e.g. A=SERIAL1,B=SERIAL2")
+    parser.add_argument("--repeat", type=int, default=1, help="runs per phone (0 = until Ctrl+C)")
+    parser.add_argument("--delay", type=float, default=0, help="seconds between repeated runs")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -160,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_devices:
         return cli_list_devices(args.appium_url)
     if args.run:
-        return cli_run(args.run, args.devices, args.appium_url)
+        return cli_run(args.run, args.devices, args.roles, args.repeat, args.delay, args.appium_url)
     return run_gui(args.appium_url)
 
 

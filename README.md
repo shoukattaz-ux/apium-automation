@@ -1,6 +1,6 @@
 # Device Automation Dashboard
 
-A Windows desktop app that drives 2–3 real Android phones at once through
+A Windows desktop app that drives several real Android phones at once through
 Appium, to automate repetitive cross-app work (copy from one app, paste into
 another, click through a third). Each phone gets its own Appium session and
 thread, so starting, stopping or plugging in one phone never disturbs the
@@ -8,19 +8,50 @@ others.
 
 ![icon](assets/icon.png)
 
+## Features
+
+- **Dashboard** — live list of connected phones, a script picker and Start/Stop
+  per phone, a live log per phone, and a **Run History** tab.
+- **Script Builder** (no code) — add steps with forms: apps, clicks, copy/paste
+  and typing, scrolls, swipes, taps, keys, waits, screenshots. Includes
+  **Repeat** and **If element exists / Otherwise** blocks with nested steps,
+  per-step **retries** and **stop-on-failure**, and `{{variable}}` placeholders
+  in any text.
+- **Cross-phone workflows** — give steps a phone role (`A`, `B`, …): one script
+  copies on phone A and pastes on phone B, sharing variables. At run time you
+  choose which real phone plays each role.
+- **Element Picker & Recorder** — a live screenshot of the phone: hover and
+  click an element to see its attributes and the best locator (unique ones
+  first), add it as a step, or turn on **Record clicks** to build a script by
+  using the app.
+- **Repeat runs** — run N times or until stopped, with a pause between runs.
+- **Schedules** — run scripts daily at set times on chosen weekdays, or every N
+  minutes. Busy or unplugged phones are skipped and logged.
+- **Run reports** — every run saves a JSON and an HTML report, with a
+  screenshot of each failed step, to `runs/`. You can filter runs, open their
+  reports and export to CSV from the History tab.
+- **Developer Mode** — write `def run(device): ...` in Python with syntax
+  highlighting, using the same action API as the builder.
+- **Packaging** — one-folder Windows build; Node, Appium and adb can be bundled
+  so end users install nothing.
+
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `core/devices.py` | Phase 1: `list_connected_devices()`, `DeviceSession` (one UiAutomator2 session per phone), `connect_all_devices()`, and the shared action API (`open_app`, `click`, `scroll`, `wait`, `wait_for_element`, `copy_text`, `paste_text`, `tap`, `back`). |
-| `core/schema.py` | The JSON script format, with validation shared by the engine and the builder. |
-| `core/runner.py` | Phase 2: `ScriptRunner`, `StatusBoard`, `run_script_on_devices()`. Steps whose element isn't found are logged and skipped. |
-| `core/manager.py` | Per-device run/session management for the dashboard. |
+| `core/devices.py` | `list_connected_devices()`, `DeviceSession` (one UiAutomator2 session per phone) and its action API: `open_app`, `close_app`, `click`, `exists`, `wait_for_element`, `copy_text`, `paste_text`, `scroll`, `scroll_to_text`, `swipe_percent`, `tap_percent`, `press_key`, `screenshot_png`, `page_source`. |
+| `core/schema.py` | The JSON script format: action specs (which drive the builder's forms), nested-block validation, roles, `{{variable}}` rendering. |
+| `core/runner.py` | `ScriptRunner` (blocks, retries, on-fail, roles, variables, reports), `run_repeatedly`, `run_script_on_devices`. |
+| `core/manager.py` | Session and run management: one run per phone, workflows reserve all their phones, repeats, finish hooks. |
+| `core/history.py` | Run recorder, JSON/HTML reports, failure screenshots, CSV export. |
+| `core/inspector.py` | Parses the screen hierarchy, finds the element under a point, ranks locators. |
+| `core/scheduler.py` | Daily / interval schedules stored in `configs/schedules.json`. |
 | `core/appium_server.py` | Detects Appium and starts a bundled or installed copy if needed. |
-| `ui/dashboard.py` | Phase 3: device list, script picker, Start/Stop, live per-device log. |
-| `ui/script_editor.py` | Phase 4 (form-based **Script Builder**) and Phase 5 (**Developer Mode** Python editor) in one window. |
-| `configs/*.json` | Saved step scripts. `configs/scripts/*.py` holds developer scripts. Both are read at runtime, so new scripts need no rebuild. |
-| `packaging/` | Phase 6: PyInstaller spec, Windows version info, build script, bundling script, end-user README. |
+| `ui/dashboard.py` | Main window. |
+| `ui/script_editor.py` | Script Builder and Developer Mode. |
+| `ui/inspector.py`, `ui/run_dialog.py`, `ui/history.py`, `ui/schedules.py` | Element picker, Run dialog, History tab, Schedules. |
+| `configs/` | Saved scripts (`*.json`, `scripts/*.py`) and schedules, read at runtime. |
+| `packaging/` | PyInstaller spec, Windows version info, build and bundling scripts, end-user README. |
 
 `core/` has no Qt imports, so it also runs from the command line and in tests.
 
@@ -31,11 +62,12 @@ the UiAutomator2 driver (`npm i -g appium && appium driver install uiautomator2`
 
 ```bash
 pip install -r requirements.txt
-python main.py                                   # dashboard
-python main.py --list-devices                    # Phase 1 check: each phone's foreground app
-python main.py --run configs/example_copy_task.json            # run on every phone, no UI
-python main.py --run my_task.json --devices SERIAL1,SERIAL2    # only some phones
-python -m pytest -q                              # tests (fake devices, no phone needed)
+python main.py                                    # dashboard
+python main.py --list-devices                     # each phone's foreground app
+python main.py --run configs/example_copy_task.json                     # every phone, no UI
+python main.py --run task.json --devices S1,S2 --repeat 5 --delay 30    # some phones, 5 runs each
+python main.py --run configs/example_two_phone_workflow.json --roles A=S1,B=S2   # workflow
+python -m pytest -q                               # tests (fake phones, no device needed)
 ```
 
 The Appium URL defaults to `http://127.0.0.1:4723`; override it with
@@ -45,23 +77,45 @@ The Appium URL defaults to `http://127.0.0.1:4723`; override it with
 
 ```json
 {
-  "name": "Copy task between apps",
+  "name": "Copy order to the other phone",
   "steps": [
-    {"action": "open_app", "package": "com.example.app"},
-    {"action": "wait_for_element", "locator_type": "id", "locator_value": "com.example.app:id/title", "timeout_seconds": 15},
-    {"action": "click", "locator_type": "id", "locator_value": "com.example.app:id/button"},
-    {"action": "copy_text", "locator_type": "id", "locator_value": "com.example.app:id/text_field", "save_as": "copied_value"},
-    {"action": "scroll", "direction": "down", "times": 2},
-    {"action": "paste_text", "locator_type": "id", "locator_value": "com.other.app:id/input_field", "value_from": "copied_value"},
-    {"action": "wait", "seconds": 3}
+    {"action": "open_app", "package": "com.shop.app", "device": "A"},
+    {"action": "copy_text", "locator_type": "id", "locator_value": "com.shop.app:id/order",
+     "save_as": "order", "device": "A", "retries": 2},
+    {"action": "if_exists", "locator_type": "text", "locator_value": "Paid", "device": "A",
+     "then": [{"action": "set_variable", "name": "status", "value": "paid"}],
+     "else": [{"action": "set_variable", "name": "status", "value": "unpaid"}]},
+    {"action": "repeat", "times": 3, "steps": [
+      {"action": "swipe", "start_x": 50, "start_y": 75, "end_x": 50, "end_y": 25, "device": "B"}
+    ]},
+    {"action": "paste_text", "locator_type": "id", "locator_value": "com.notes:id/body",
+     "text": "Order {{order}} is {{status}}", "device": "B", "on_fail": "stop"}
   ]
 }
 ```
 
+| Action | Fields |
+| --- | --- |
+| `open_app`, `close_app` | `package` |
+| `click`, `wait_for_element` | locator, `timeout_seconds` |
+| `copy_text` | locator, `save_as` |
+| `paste_text` | locator, `value_from` (variable) or `text` (with `{{placeholders}}`) |
+| `scroll` | `direction` (up/down/left/right), `times` |
+| `scroll_to_text` | `text` |
+| `swipe` | `start_x`, `start_y`, `end_x`, `end_y` (percent of screen), `duration_ms` |
+| `tap` | `x`, `y` (percent of screen) |
+| `press_key` | `key`: back, home, enter, recent_apps, delete, search, menu, volume_up, volume_down |
+| `wait` | `seconds` |
+| `set_variable` | `name`, `value` |
+| `screenshot` | `name`: the screenshot is saved in the run report |
+| `repeat` | `times`, `steps` (`{{loop_index}}` counts up) |
+| `if_exists` | locator, `timeout_seconds`, `then`, `else` |
+| `stop_run` | `message` |
+
 Locator types: `id`, `xpath`, `accessibility id`, `text` (exact visible text),
-`class name`, `android uiautomator`. `click`, `copy_text` and `paste_text` also
-accept an optional `timeout_seconds` (default 15). `paste_text` takes either
-`value_from` (a variable saved by `copy_text`) or a fixed `text`.
+`class name`, `android uiautomator`. All device steps also accept `device`
+(phone role), `retries` and `on_fail` (`skip` or `stop`). Built-in variables:
+`{{run_number}}`, `{{loop_index}}`, `{{device}}`, `{{date}}`, `{{time}}`.
 
 Developer scripts are Python files defining `run(device)`; `device` is the same
 `DeviceSession` the JSON engine uses. `print()` output goes to the dashboard log,

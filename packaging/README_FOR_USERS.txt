@@ -31,6 +31,17 @@ Scripts
    - Saved scripts are plain files in the "configs" folder next to the .exe.
      You can copy scripts between computers by copying that folder.
 
+More tools
+   - Element Picker: shows a live picture of the phone. Click a button to see
+     how to find it, or tick "Record clicks" and just use the app — each click
+     becomes a step.
+   - Run...: run a script several times in a row, or a "workflow" that uses
+     two phones (e.g. copy on phone A, paste on phone B).
+   - Schedules: run a script every day at a set time, or every N minutes,
+     while the app is open.
+   - Run History tab: every run with its result. "Open Report" shows each
+     step, with a screenshot of anything that failed (saved in "runs").
+
 Troubleshooting
    - Phone not listed: re-plug the cable, check the "Allow USB debugging"
      prompt on the phone, try another cable/port (charge-only cables won't work).
