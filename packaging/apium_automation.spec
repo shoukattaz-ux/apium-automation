@@ -18,6 +18,18 @@ from PyInstaller.utils.hooks import collect_submodules
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 APP = "DeviceAutomation"
 
+# Version comes from core/version.py so the .exe, About box and installer agree.
+_version_ns = {}
+with open(os.path.join(ROOT, "core", "version.py"), encoding="utf-8") as handle:
+    exec(handle.read(), _version_ns)
+VERSION = _version_ns["APP_VERSION"]
+_parts = (VERSION.split(".") + ["0", "0", "0", "0"])[:4]
+_template = open(os.path.join(ROOT, "packaging", "version_info.txt"), encoding="utf-8").read()
+VERSION_FILE = os.path.join(workpath, "version_info.txt")
+os.makedirs(workpath, exist_ok=True)
+with open(VERSION_FILE, "w", encoding="utf-8") as handle:
+    handle.write(_template.replace("{version_tuple}", "(" + ", ".join(_parts) + ")").replace("{version}", VERSION))
+
 # Appium and Selenium import many modules lazily (by string), which PyInstaller's
 # static analysis misses; pull them in explicitly.
 hiddenimports = (
@@ -58,7 +70,7 @@ exe = EXE(
     exclude_binaries=True,  # one-folder build: faster startup than one-file
     name=APP,
     icon=os.path.join(ROOT, "assets", "icon.ico"),
-    version=os.path.join(ROOT, "packaging", "version_info.txt"),
+    version=VERSION_FILE,
     console=False,
     upx=False,
 )

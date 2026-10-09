@@ -24,8 +24,9 @@ from typing import Any, Callable, Iterable, Mapping
 
 from .devices import DeviceError, DeviceSession, RunStopped
 from .history import RunRecorder, StepRecord
+from .settings import default_timeout
 from .schema import (
-    ACTIONS, DEFAULT_TIMEOUT_SECONDS, ScriptError, describe_step, format_path, load_script, render,
+    ACTIONS, ScriptError, describe_step, format_path, load_script, render,
     script_roles,
 )
 
@@ -200,10 +201,10 @@ class ScriptRunner:
 
     # ------------------------------------------------------------ plumbing
 
-    def log(self, message: str, session: DeviceSession | None = None) -> None:
+    def log(self, message: str, session: DeviceSession | None = None, level: int = logging.INFO) -> None:
         targets = [session.serial] if session else self.serials
         for serial in targets:
-            log.info("[%s] %s", serial, message)
+            log.log(level, "[%s] %s", serial, message)
             if self.on_log:
                 try:
                     self.on_log(serial, message)
@@ -264,7 +265,8 @@ class ScriptRunner:
         if self.recorder:
             result.report = self.recorder.finish(result.state, message, self.variables)
         self._status(state=result.state, message=message, skipped=len(result.skipped_steps))
-        self.log(f"■ {name}: {message}")
+        level = {RunState.FAILED: logging.ERROR, RunState.PARTIAL: logging.WARNING}.get(result.state, logging.INFO)
+        self.log(f"■ {name}: {message}", level=level)
         return result
 
     def _run_steps(self, name: str) -> RunResult:
@@ -361,11 +363,11 @@ class ScriptRunner:
                 stop = step.get("on_fail") == "stop"
                 self._record(label, step, session, "failed" if stop else "skipped", started, attempt, error, shot)
                 if stop:
-                    self.log(f"{indent}  ✖ Step {label} failed: {error}", session)
+                    self.log(f"{indent}  ✖ Step {label} failed: {error}", session, logging.ERROR)
                     raise StepFailed(f"Step {label} failed: {error}") from exc
                 self._skipped.append(label)
                 self._status(skipped=len(self._skipped))
-                self.log(f"{indent}  ⚠ Step {label} skipped: {error}", session)
+                self.log(f"{indent}  ⚠ Step {label} skipped: {error}", session, logging.WARNING)
                 return _FAILED
             else:
                 shot = value if step["action"] == "screenshot" else ""
@@ -384,7 +386,7 @@ class ScriptRunner:
             raw = step.get(name, default)
             return render(raw, self.variables) if isinstance(raw, str) else raw
 
-        timeout = float(step.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
+        timeout = float(step.get("timeout_seconds", default_timeout()))
         locator = (step.get("locator_type"), value("locator_value"))
 
         if action == "wait":
@@ -465,7 +467,7 @@ class ScriptRunner:
         except RunStopped:
             return RunResult(RunState.STOPPED, variables=self.variables)
         except Exception as exc:
-            self.log("  ✖ " + traceback.format_exc().rstrip().replace("\n", "\n    "))
+            self.log("  ✖ " + traceback.format_exc().rstrip().replace("\n", "\n    "), level=logging.ERROR)
             shot = self._failure_screenshot(session, "developer_script_failed")
             if self.recorder:
                 self.recorder.add_step(StepRecord("1", f"Developer script {name}", session.serial, "failed",

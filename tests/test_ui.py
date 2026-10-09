@@ -18,10 +18,10 @@ from tests.fakes import FakeSession  # noqa: E402
 
 @pytest.fixture(scope="module")
 def app():
-    from ui.theme import STYLESHEET
+    from ui.theme import apply_theme
 
     application = QApplication.instance() or QApplication([])
-    application.setStyleSheet(STYLESHEET)
+    apply_theme(application)
     return application
 
 

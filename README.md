@@ -32,8 +32,19 @@ others.
   reports and export to CSV from the History tab.
 - **Developer Mode** — write `def run(device): ...` in Python with syntax
   highlighting, using the same action API as the builder.
-- **Packaging** — one-folder Windows build; Node, Appium and adb can be bundled
-  so end users install nothing.
+- **Settings** (Ctrl+,) — default element timeout, Appium URL, log folder
+  (with Open Logs Folder), version info.
+- **Logging and crash handling** — everything goes to a rotating daily log
+  (`logs/app-YYYY-MM-DD.log`, 2 MB × 5 backups, 30 days kept). Unhandled
+  errors are logged with full tracebacks and shown as a clean "Something went
+  wrong — details saved to logs/…" dialog instead of a crash.
+- **Polish** — splash screen during startup, one dark theme applied app-wide,
+  a menu bar with standard shortcut hints (Ctrl+N new script, F5 refresh
+  phones, Ctrl+, settings, Ctrl+R run, Ctrl+I element picker, Ctrl+. stop all),
+  and a crisp multi-size app/taskbar icon.
+- **Packaging** — one-folder Windows build plus an Inno Setup installer (Start
+  Menu entry, optional desktop shortcut, uninstaller). Node, Appium and adb
+  can be bundled so end users install nothing.
 
 ## Layout
 
@@ -47,11 +58,18 @@ others.
 | `core/inspector.py` | Parses the screen hierarchy, finds the element under a point, ranks locators. |
 | `core/scheduler.py` | Daily / interval schedules stored in `configs/schedules.json`. |
 | `core/appium_server.py` | Detects Appium and starts a bundled or installed copy if needed. |
+| `core/logging_setup.py`, `core/settings.py`, `core/version.py` | Rotating log + exception hooks, user settings, app version. |
 | `ui/dashboard.py` | Main window. |
 | `ui/script_editor.py` | Script Builder and Developer Mode. |
 | `ui/inspector.py`, `ui/run_dialog.py`, `ui/history.py`, `ui/schedules.py` | Element picker, Run dialog, History tab, Schedules. |
+| `ui/settings_dialog.py`, `ui/splash.py`, `ui/errors.py`, `ui/theme.py` | Settings, splash screen, error dialog, app-wide theme. |
 | `configs/` | Saved scripts (`*.json`, `scripts/*.py`) and schedules, read at runtime. |
-| `packaging/` | PyInstaller spec, Windows version info, build and bundling scripts, end-user README. |
+| `packaging/` | PyInstaller spec, Inno Setup installer, icon generator, build and bundling scripts, end-user README. |
+
+User data (`configs/`, `logs/`, `runs/`, `settings.json`) lives next to the
+program when that folder is writable, otherwise in
+`%LOCALAPPDATA%\DeviceAutomation` (e.g. after an all-users install into
+Program Files).
 
 `core/` has no Qt imports, so it also runs from the command line and in tests.
 
@@ -132,8 +150,18 @@ powershell -ExecutionPolicy Bypass -File packaging\prepare_bundle.ps1
 packaging\build.bat
 ```
 
-This produces a one-folder build in `dist\DeviceAutomation\`; zip that folder to
-share it. `configs\` sits next to `DeviceAutomation.exe`, so users can add or
+This runs the tests, produces the one-folder build in `dist\DeviceAutomation\`
+and, if [Inno Setup 6](https://jrsoftware.org/isdl.php) is installed, the
+installer `dist\installer\DeviceAutomation-Setup-<version>.exe`
+(`packaging\installer.iss`). The installer installs per-user without an admin
+prompt (or for all users if chosen), adds a Start Menu entry and an optional
+desktop shortcut, keeps user scripts across upgrades, and its uninstaller asks
+whether to also delete scripts, logs and run history. Without Inno Setup, zip
+`dist\DeviceAutomation` to share the portable folder.
+
+The version lives only in `core/version.py`; the .exe properties, About box and
+installer name pick it up. `python packaging/make_icon.py` regenerates the
+icons. `configs\` sits next to `DeviceAutomation.exe`, so users can add or
 edit scripts without rebuilding, and `README.txt` tells them how to set up their
 phone. At startup the app checks for Appium: it starts the bundled (or
 installed) copy if it can find one; otherwise it asks the user to run `appium`

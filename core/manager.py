@@ -64,7 +64,13 @@ class DeviceManager:
         """Called (on the run's thread) after a run — including all its repeats — ends."""
         self._finished_listeners.append(listener)
 
-    def _log(self, serial: str, message: str) -> None:
+    def _log(self, serial: str, message: str, level: int = logging.INFO) -> None:
+        """Write to the log file and show in the UI log panel."""
+        log.log(level, "[%s] %s", serial, message)
+        self._notify(serial, message)
+
+    def _notify(self, serial: str, message: str) -> None:
+        """Show in the UI log panel only (the runner logs to file itself)."""
         for listener in list(self._log_listeners):
             try:
                 listener(serial, message)
@@ -195,7 +201,7 @@ class DeviceManager:
                     sessions[serial] = self.session_for(serial)
                 except DeviceError as exc:
                     for member in run.serials:
-                        self._log(member, f"✖ {exc}")
+                        self._log(member, f"✖ {exc}", logging.ERROR)
                         self.status.update(member, state=RunState.FAILED, message=str(exc))
                     return
                 if run.stop_event.is_set():
@@ -213,7 +219,7 @@ class DeviceManager:
             def make_runner(run_number: int) -> ScriptRunner:
                 recorder = (RunRecorder(name, devices, run_number, trigger, self.history_dir)
                             if self.record_history else None)
-                return ScriptRunner(target, script, on_log=self._log, status=self.status,
+                return ScriptRunner(target, script, on_log=self._notify, status=self.status,
                                     stop_event=run.stop_event, recorder=recorder, run_number=run_number)
 
             def on_wait(next_run: int, seconds: float) -> None:
@@ -237,7 +243,7 @@ class DeviceManager:
         except Exception as exc:
             log.exception("Run of %s crashed", name)
             for member in run.serials:
-                self._log(member, f"✖ Unexpected error: {exc}")
+                self._log(member, f"✖ Unexpected error: {exc}", logging.ERROR)
                 self.status.update(member, state=RunState.FAILED, message=f"Failed: {exc}")
         finally:
             with self._lock:

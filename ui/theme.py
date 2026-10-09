@@ -57,7 +57,7 @@ QToolBar QToolButton {{
     background: transparent;
     border: 1px solid transparent;
     border-radius: 6px;
-    padding: 6px 12px;
+    padding: 6px 9px;
 }}
 QToolBar QToolButton:hover {{ background: {SURFACE_ALT}; border-color: {BORDER}; }}
 QStatusBar {{ background: {SURFACE}; color: {TEXT_MUTED}; border-top: 1px solid {BORDER}; }}
@@ -161,6 +161,24 @@ QCheckBox::indicator, QTableWidget::indicator {{
 QCheckBox::indicator:checked, QTableWidget::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
 QScrollBar::handle:horizontal {{ background: {BORDER}; border-radius: 4px; min-width: 30px; }}
+QMenuBar {{ background: {SURFACE}; border-bottom: 1px solid {BORDER}; padding: 2px 6px; }}
+QMenuBar::item {{ background: transparent; padding: 4px 10px; border-radius: 4px; }}
+QMenuBar::item:selected {{ background: {SURFACE_ALT}; }}
+QMenu {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 6px; padding: 4px; }}
+QMenu::item {{ padding: 6px 28px 6px 14px; border-radius: 4px; }}
+QMenu::item:selected {{ background: {ACCENT}; color: white; }}
+QMenu::item:disabled {{ color: #5c6270; }}
+QMenu::separator {{ height: 1px; background: {BORDER}; margin: 4px 8px; }}
+QProgressBar {{
+    background: {BG}; border: 1px solid {BORDER}; border-radius: 5px; height: 10px; text-align: center;
+    color: transparent;
+}}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}
+QMessageBox QLabel {{ background: transparent; }}
+QMessageBox QTextEdit, QTextEdit {{
+    background: {BG}; border: 1px solid {BORDER}; border-radius: 6px;
+    font-family: "Cascadia Mono", "Consolas", "Courier New", "DejaVu Sans Mono", monospace; font-size: 9pt;
+}}
 QToolTip {{ background: {SURFACE_ALT}; color: {TEXT}; border: 1px solid {BORDER}; padding: 4px; }}
 """
 
@@ -168,3 +186,31 @@ QToolTip {{ background: {SURFACE_ALT}; color: {TEXT}; border: 1px solid {BORDER}
 def status_dot_style(state: str) -> str:
     color = STATUS_COLORS.get(state, STATUS_COLORS[RunState.IDLE])
     return f"background: {color}; border-radius: 6px; min-width: 12px; max-width: 12px; min-height: 12px; max-height: 12px;"
+
+
+def dark_palette():
+    """Palette matching the stylesheet, so anything QSS doesn't reach (scroll corners,
+    native-ish popups, disabled text) is dark too instead of default gray."""
+    from PySide6.QtGui import QColor, QPalette
+
+    palette = QPalette()
+    roles = {
+        QPalette.Window: BG, QPalette.WindowText: TEXT, QPalette.Base: BG, QPalette.AlternateBase: SURFACE,
+        QPalette.ToolTipBase: SURFACE_ALT, QPalette.ToolTipText: TEXT, QPalette.Text: TEXT,
+        QPalette.Button: SURFACE_ALT, QPalette.ButtonText: TEXT, QPalette.BrightText: "#ffffff",
+        QPalette.Highlight: ACCENT, QPalette.HighlightedText: "#ffffff", QPalette.Link: "#60a5fa",
+        QPalette.PlaceholderText: "#6b7280", QPalette.Mid: BORDER, QPalette.Dark: "#101216",
+        QPalette.Light: SURFACE_ALT, QPalette.Shadow: "#000000",
+    }
+    for role, color in roles.items():
+        palette.setColor(role, QColor(color))
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):
+        palette.setColor(QPalette.Disabled, role, QColor("#5c6270"))
+    return palette
+
+
+def apply_theme(app) -> None:
+    """Apply the dashboard look application-wide: every window, dialog and popup."""
+    app.setStyle("Fusion")
+    app.setPalette(dark_palette())
+    app.setStyleSheet(STYLESHEET)

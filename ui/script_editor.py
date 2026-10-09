@@ -30,8 +30,9 @@ from PySide6.QtWidgets import (
 
 from core import paths
 from core.devices import DeviceError, list_installed_packages
+from core.settings import default_timeout
 from core.schema import (
-    ACTION_LABELS, ACTIONS, BLOCK_LABELS, COMMON_FIELDS, FieldSpec, ScriptError, describe_step, format_path,
+    ACTION_LABELS, ACTIONS, BLOCK_LABELS, COMMON_FIELDS, DEFAULT_TIMEOUT_SECONDS, FieldSpec, ScriptError, describe_step, format_path,
     safe_filename, save_script, script_roles, script_variables, validate_script, validate_step,
 )
 
@@ -241,7 +242,10 @@ class StepDialog(QDialog):
         self.adjustSize()
 
     def _add_field(self, form: QFormLayout, spec: FieldSpec, step: dict | None) -> None:
-        value = step.get(spec.name, spec.default) if step else spec.default
+        default = spec.default
+        if spec.name == "timeout_seconds" and spec.default == DEFAULT_TIMEOUT_SECONDS:
+            default = default_timeout()  # the user's choice in Settings
+        value = step.get(spec.name, default) if step else default
         widget = self._make_input(spec, value)
         self.inputs[spec.name] = widget
         error = QLabel()

@@ -401,7 +401,9 @@ def describe_step(step: dict) -> str:
         source = f"{{{{{step['value_from']}}}}}" if step.get("value_from") else f"“{step.get('text', '')}”"
         text = f"{label} {source} into {target}"
     elif action == "wait_for_element":
-        text = f"{label} {target} (up to {step.get('timeout_seconds', DEFAULT_TIMEOUT_SECONDS)}s)"
+        from .settings import default_timeout
+
+        text = f"{label} {target} (up to {step.get('timeout_seconds', default_timeout()):g}s)"
     else:
         text = f"{label} {target}"
     extras = []

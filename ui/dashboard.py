@@ -6,6 +6,7 @@ cross-phone workflows), element picker and schedules.
 
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -26,10 +27,13 @@ from core.manager import DeviceManager
 from core.runner import PythonScript, RunState, load_any_script, needs_role_mapping, roles_of, script_name
 from core.scheduler import Schedule, ScheduleStore
 from core.schema import ScriptError
+from core.version import APP_NAME, APP_VERSION
 
 from .history import HistoryPanel
 from .run_dialog import RunDialog, RunRequest
 from .theme import STATUS_LABELS, status_dot_style
+
+log = logging.getLogger(__name__)
 
 SCAN_INTERVAL_MS = 4000
 SCHEDULE_INTERVAL_MS = 15000
@@ -161,10 +165,10 @@ class MainWindow(QMainWindow):
     def __init__(self, manager: DeviceManager | None = None, scan_devices: bool = True,
                  schedules: ScheduleStore | None = None):
         super().__init__()
-        self.setWindowTitle("Device Automation Dashboard")
+        self.setWindowTitle(APP_NAME)
         if paths.icon_path().exists():
             self.setWindowIcon(QIcon(str(paths.icon_path())))
-        self.resize(1240, 760)
+        self.resize(1320, 780)
 
         self.manager = manager or DeviceManager()
         self.schedules = schedules or ScheduleStore()
@@ -183,8 +187,12 @@ class MainWindow(QMainWindow):
         self.selected_serial: str | None = None
         self.scripts: list[ScriptEntry] = []
         self._scan_in_progress = False
+        self._last_scan_error = ""
+        self.scans_completed = 0
         self._windows: list[QWidget] = []
 
+        self._build_actions()
+        self._build_menus()
         self._build_toolbar()
         self._build_body()
         self._build_statusbar()
@@ -204,34 +212,74 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ layout
 
-    def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+    def _build_actions(self) -> None:
+        """One QAction per command, shared by the menu bar (with shortcut hints) and the toolbar."""
+        self.actions: dict[str, QAction] = {}
 
-        def action(text: str, tip: str, slot, shortcut: str | None = None) -> QAction:
+        def action(key: str, text: str, toolbar_text: str, tip: str, slot, shortcut: str | None = None) -> QAction:
             act = QAction(text, self)
-            act.setToolTip(tip + (f"  ({shortcut})" if shortcut else ""))
+            act.setIconText(toolbar_text)
+            act.setStatusTip(tip)
+            act.setToolTip(tip + (f"  ({QKeySequence(shortcut).toString(QKeySequence.NativeText)})"
+                                  if shortcut else ""))
             if shortcut:
                 act.setShortcut(QKeySequence(shortcut))
             act.triggered.connect(lambda _=False: slot())
-            toolbar.addAction(act)
+            self.actions[key] = act
             return act
 
-        action("⟳  Add New Device", "Re-scan USB for connected phones", self.scan_devices, "F5")
-        action("📁  Configs", "Open the folder that holds saved scripts", self.open_config_folder)
-        toolbar.addSeparator()
-        action("＋  New Script", "Create a script with the form builder or in Python", self.new_script, "Ctrl+N")
-        action("✎  Edit Script…", "Open a saved script in the builder", self.edit_script, "Ctrl+O")
-        action("◎  Element Picker", "Inspect a phone screen, pick elements and record steps", self.open_inspector,
-               "Ctrl+I")
-        toolbar.addSeparator()
-        action("▶  Run…", "Run a script on chosen phones — repeats and cross-phone workflows", self.open_run_dialog,
-               "Ctrl+R")
-        action("▶▶  Start All", "Start each idle phone's selected script", self.start_all)
-        action("■  Stop All", "Stop every running phone", self.stop_all, "Ctrl+.")
-        toolbar.addSeparator()
-        action("⏱  Schedules", "Run scripts automatically at set times", self.open_schedules)
+        action("refresh", "&Refresh Devices", "⟳  Add New Device", "Re-scan USB for connected phones",
+               self.scan_devices, "F5")
+        action("configs", "Open &Configs Folder", "📁  Configs", "Open the folder that holds saved scripts",
+               self.open_config_folder)
+        action("logs", "Open &Logs Folder", "Logs", "Open the folder with the app's log files", self.open_logs_folder)
+        action("new", "&New Script…", "＋  New Script", "Create a script with the form builder or in Python",
+               self.new_script, "Ctrl+N")
+        action("edit", "&Edit Script…", "✎  Edit Script…", "Open a saved script in the builder", self.edit_script,
+               "Ctrl+O")
+        action("picker", "Element &Picker…", "◎  Element Picker",
+               "Inspect a phone screen, pick elements and record steps", self.open_inspector, "Ctrl+I")
+        action("run", "&Run…", "▶  Run…", "Run a script on chosen phones — repeats and cross-phone workflows",
+               self.open_run_dialog, "Ctrl+R")
+        action("start_all", "Start &All", "▶▶  Start All", "Start each idle phone's selected script",
+               self.start_all, "Ctrl+Shift+R")
+        action("stop_all", "&Stop All", "■  Stop All", "Stop every running phone", self.stop_all, "Ctrl+.")
+        action("schedules", "Sc&hedules…", "⏱  Schedules", "Run scripts automatically at set times",
+               self.open_schedules, "Ctrl+Shift+S")
+        action("settings", "&Settings…", "⚙  Settings", "Default timeout, log folder, Appium URL, version",
+               self.open_settings, "Ctrl+,")
+        action("guide", "&User Guide", "Guide", "Open the setup and usage guide", self.open_guide)
+        action("about", "&About", "About", "Version information", self.show_about)
+        action("quit", "&Quit", "Quit", "Close the app", self.close, "Ctrl+Q")
+
+    def _build_menus(self) -> None:
+        a = self.actions
+        menus = (
+            ("&File", ["new", "edit", None, "configs", "logs", None, "settings", None, "quit"]),
+            ("&Devices", ["refresh", None, "run", "start_all", "stop_all"]),
+            ("&Tools", ["picker", "schedules"]),
+            ("&Help", ["guide", "logs", None, "about"]),
+        )
+        for title, keys in menus:
+            menu = self.menuBar().addMenu(title)
+            for key in keys:
+                if key is None:
+                    menu.addSeparator()
+                else:
+                    menu.addAction(a[key])
+
+    def _build_toolbar(self) -> None:
+        toolbar = QToolBar("Main")
+        toolbar.setObjectName("MainToolbar")
+        toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.addToolBar(toolbar)
+        for key in ("refresh", "configs", None, "new", "edit", "picker", None, "run", "start_all", "stop_all",
+                    None, "schedules", "settings"):
+            if key is None:
+                toolbar.addSeparator()
+            else:
+                toolbar.addAction(self.actions[key])
 
     def _build_body(self) -> None:
         devices_panel = QFrame()
@@ -349,22 +397,29 @@ class MainWindow(QMainWindow):
 
     def _apply_scan(self, serials: list, models: dict, error: str) -> None:
         self._scan_in_progress = False
+        self.scans_completed += 1
         if error:
+            if error != self._last_scan_error:
+                log.warning("Device scan failed: %s", error)
             self.statusBar().showMessage(error, 8000)
             serials = []
+        self._last_scan_error = error
         present = set(serials)
         for serial in serials:
             row = self.rows.get(serial)
             if row is None:
                 self._add_row(serial, models.get(serial, serial))
+                log.info("Device connected: %s (%s)", models.get(serial, serial), serial)
                 self._append_log(serial, f"Device connected: {models.get(serial, serial)} ({serial})")
             elif not row.connected:
                 row.set_connected(True)
+                log.info("Device reconnected: %s", serial)
                 self._append_log(serial, "Device reconnected")
         for serial, row in self.rows.items():
             if serial not in present and row.connected and not error:
                 row.set_connected(False)
                 self.manager.device_removed(serial)
+                log.warning("Device disconnected: %s", serial)
                 self._append_log(serial, "Device disconnected")
         connected = sum(1 for r in self.rows.values() if r.connected)
         self.device_count.setText(f"{connected} connected")
@@ -666,6 +721,31 @@ class MainWindow(QMainWindow):
         idle = [s for s, _ in self.connected_devices() if not self.manager.is_running(s)]
         serial = self.selected_serial if self.selected_serial in idle else (idle[0] if idle else None)
         return self._track(InspectorWindow(self, add_steps=add_steps, on_pick=on_pick, roles=roles, serial=serial))
+
+    def open_settings(self) -> None:
+        from .settings_dialog import SettingsDialog
+
+        if SettingsDialog(self, self.manager).exec():
+            self.statusBar().showMessage("Settings saved", 4000)
+            self.check_appium()
+
+    def open_logs_folder(self) -> None:
+        paths.logs_dir().mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths.logs_dir())))
+
+    def open_guide(self) -> None:
+        for candidate in (paths.app_dir() / "README.txt", paths.app_dir() / "packaging" / "README_FOR_USERS.txt",
+                          paths.app_dir() / "README.md"):
+            if candidate.exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(candidate)))
+                return
+
+    def show_about(self) -> None:
+        QMessageBox.about(self, f"About {APP_NAME}",
+                          f"<h3>{APP_NAME}</h3><p>Version {APP_VERSION}</p>"
+                          "<p>Drive several Android phones at once with Appium: scripts, cross-phone "
+                          "workflows, an element picker, schedules and run reports.</p>"
+                          f"<p>Data folder: {paths.data_dir()}</p>")
 
     # ------------------------------------------------------------------ appium
 

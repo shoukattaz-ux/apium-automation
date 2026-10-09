@@ -160,7 +160,7 @@ class HistoryPanel(QWidget):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def export(self) -> None:
-        default = paths.app_dir() / f"run-history-{datetime.now():%Y%m%d}.csv"
+        default = paths.data_dir() / f"run-history-{datetime.now():%Y%m%d}.csv"
         target, _ = QFileDialog.getSaveFileName(self, "Export run history", str(default), "CSV files (*.csv)")
         if target:
             export_csv(self._visible_runs(), Path(target))
