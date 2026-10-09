@@ -159,6 +159,13 @@ desktop shortcut, keeps user scripts across upgrades, and its uninstaller asks
 whether to also delete scripts, logs and run history. Without Inno Setup, zip
 `dist\DeviceAutomation` to share the portable folder.
 
+No Windows machine? The **Build** GitHub Actions workflow
+(`.github/workflows/build.yml`) runs the tests and builds the app and the
+installer on GitHub's Windows runners for every push and pull request.
+Download them from the run's **Artifacts**. Pushes to `main`, manual runs
+and version tags also bundle Appium, Node and adb. Pushing a tag such as
+`v1.1.0` publishes a GitHub Release with the installer attached.
+
 The version lives only in `core/version.py`; the .exe properties, About box and
 installer name pick it up. `python packaging/make_icon.py` regenerates the
 icons. `configs\` sits next to `DeviceAutomation.exe`, so users can add or
