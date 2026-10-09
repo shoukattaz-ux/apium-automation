@@ -1,0 +1,14 @@
+{
+  "name": "Example - copy between apps",
+  "steps": [
+    {"action": "open_app", "package": "com.android.settings"},
+    {"action": "wait_for_element", "locator_type": "text", "locator_value": "About phone", "timeout_seconds": 15},
+    {"action": "click", "locator_type": "text", "locator_value": "About phone"},
+    {"action": "copy_text", "locator_type": "id", "locator_value": "android:id/summary", "save_as": "copied_value"},
+    {"action": "scroll", "direction": "down", "times": 2},
+    {"action": "wait", "seconds": 1},
+    {"action": "open_app", "package": "com.google.android.apps.messaging"},
+    {"action": "paste_text", "locator_type": "class name", "locator_value": "android.widget.EditText", "value_from": "copied_value"},
+    {"action": "wait", "seconds": 3}
+  ]
+}
