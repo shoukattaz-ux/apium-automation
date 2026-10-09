@@ -13,7 +13,7 @@
 import os
 import shutil
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 APP = "DeviceAutomation"
@@ -56,7 +56,11 @@ a = Analysis(
         (os.path.join(ROOT, "assets"), "assets"),
         # Seed copy, used to recreate configs\ if a user deletes it.
         (os.path.join(ROOT, "configs"), "default_configs"),
-    ],
+    ]
+    # appium/version.py calls importlib.metadata.version("Appium-Python-Client") when it connects
+    # to a phone; without the package metadata every connection fails. `main.py --self-test`
+    # checks this in the built app.
+    + copy_metadata("Appium-Python-Client", recursive=True),
     hiddenimports=hiddenimports,
     excludes=excludes,
     noarchive=False,

@@ -102,6 +102,81 @@ def cli_run(script_path: str, device_filter: str | None, roles: str | None, repe
     return 1 if any(r.state == RunState.FAILED for r in results) else 0
 
 
+def self_test() -> int:
+    """Check that a (packaged) build can do what the app needs, without a phone or a window.
+
+    Exercises the code paths that only run when a phone connects, so packaging
+    mistakes (missing modules or package metadata) show up at build time instead
+    of on the user's PC. Exit code 0 = all good. Results go to the log and to
+    logs/self-test.txt (a windowed .exe has no console).
+    """
+    import importlib
+    import json
+    import traceback
+
+    results: dict[str, str] = {}
+    ok = True
+
+    def check(name: str, func) -> None:
+        nonlocal ok
+        try:
+            results[name] = "ok: " + str(func() or "")
+        except Exception:  # report every failure, keep checking the rest
+            ok = False
+            results[name] = "FAILED: " + traceback.format_exc().strip().splitlines()[-1]
+
+    def imports(*modules: str) -> None:
+        for module in modules:
+            importlib.import_module(module)
+
+    def appium_client():
+        imports("appium.webdriver", "appium.webdriver.common.appiumby")
+        from appium.options.android import UiAutomator2Options
+        from appium.version import version  # reads package metadata, which PyInstaller can drop
+        options = UiAutomator2Options()
+        options.udid = "self-test"
+        return f"Appium-Python-Client {version}"
+
+    def selenium_wait():
+        imports("selenium.common.exceptions", "selenium.webdriver.support.expected_conditions",
+                "selenium.webdriver.support.ui")
+        import selenium
+        return f"selenium {selenium.__version__}"
+
+    def qt():
+        imports("PySide6.QtWidgets")
+        import PySide6
+        return f"PySide6 {PySide6.__version__}"
+
+    def bundled_tools():
+        from core.appium_server import find_appium_command
+        from core.devices import adb_path
+        return f"appium={find_appium_command()} adb={adb_path()}"
+
+    def example_scripts():
+        from core.library import list_scripts
+        from core.runner import load_any_script
+        entries = list_scripts()
+        for entry in entries:
+            load_any_script(entry.path)
+        return f"{len(entries)} scripts load"
+
+    check("appium_client", appium_client)
+    check("selenium", selenium_wait)
+    check("qt", qt)
+    check("bundled_tools", bundled_tools)
+    check("example_scripts", example_scripts)
+    report = json.dumps({"ok": ok, "version": APP_VERSION, "checks": results}, indent=2)
+    (log.info if ok else log.error)("Self-test %s:\n%s", "passed" if ok else "FAILED", report)
+    try:
+        (paths.logs_dir() / "self-test.txt").write_text(report + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    if sys.stdout is not None:
+        print(report)
+    return 0 if ok else 1
+
+
 # --------------------------------------------------------------------- GUI
 
 
@@ -133,12 +208,24 @@ def ensure_appium(app, appium_url: str, splash=None):
     while True:
         if find_appium_command():
             if splash:
-                splash.step("Starting the Appium server…", 45)
+                splash.step("Starting the Appium server…", 40)
             log.info("Appium not running; starting it")
-            if server.start():
+
+            def on_wait(elapsed: float) -> None:
+                if splash:
+                    note = " (the first start can take a minute or two)" if elapsed > 10 else ""
+                    splash.step(f"Starting the Appium server… {elapsed:.0f}s{note}", 40 + min(15, int(elapsed / 10)))
+                else:
+                    app.processEvents()
+
+            if server.start(on_wait=on_wait):
                 log.info("Started Appium at %s", appium_url)
                 return server
-            detail = "Appium was found but did not start. Details are in logs/appium-server.log."
+            if server.process is not None and server.process.poll() is None:
+                detail = ("Appium is still starting (the first start can take a few minutes while "
+                          "antivirus scans it). Wait a moment, then click Retry.")
+            else:
+                detail = "Appium was found but did not start. Details are in logs/appium-server.log."
         else:
             detail = "Appium isn't installed on this computer, and no bundled copy was found next to the app."
         log.warning("Appium server not available: %s", detail)
@@ -157,9 +244,10 @@ def ensure_appium(app, appium_url: str, splash=None):
             splash.show()
         if box.clickedButton() is not retry:
             log.info("Continuing without Appium")
-            return None
+            # Keep a server we started: it may finish starting in the background.
+            return server if server.process is not None else None
         if is_server_running(appium_url):
-            return None
+            return server if server.process is not None else None
 
 
 def run_gui(appium_url: str) -> int:
@@ -219,10 +307,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--roles", help="phones for a cross-phone workflow, e.g. A=SERIAL1,B=SERIAL2")
     parser.add_argument("--repeat", type=int, default=1, help="runs per phone (0 = until Ctrl+C)")
     parser.add_argument("--delay", type=float, default=0, help="seconds between repeated runs")
+    parser.add_argument("--self-test", action="store_true",
+                        help="check the installation (no phone needed); exit code 0 = OK")
     parser.add_argument("-v", "--verbose", action="store_true", help="debug-level logging")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     args = parser.parse_args(argv)
-    gui = not (args.list_devices or args.run)
+    gui = not (args.list_devices or args.run or args.self_test)
 
     try:
         settings = app_settings.load()
@@ -231,6 +321,8 @@ def main(argv: list[str] | None = None) -> int:
         install_exception_hooks()
         log.info("Starting %s %s (%s mode), log file %s", APP_NAME, APP_VERSION, "GUI" if gui else "CLI", log_file)
         appium_url = args.appium_url or settings.appium_url or DEFAULT_APPIUM_URL
+        if args.self_test:
+            return self_test()
         if args.list_devices:
             return cli_list_devices(appium_url)
         if args.run:

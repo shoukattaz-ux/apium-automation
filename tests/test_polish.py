@@ -250,3 +250,68 @@ def test_splash_and_error_dialog(app, monkeypatch, tmp_path):
     assert "app-2026-01-01.log" in captured["text"]
     assert "keep running" in captured["info"] and "KeyError" in captured["details"]
     assert captured["splash_visible"] is False  # the always-on-top splash never hides the dialog
+
+
+# --------------------------------------------------------------------- Appium server start
+
+
+FAKE_APPIUM = '''
+import http.server, json, sys, time
+port = int(sys.argv[sys.argv.index("--port") + 1])
+time.sleep(float(sys.argv[1]))  # pretend to be slow (antivirus scan on first start)
+class Status(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"value": {"ready": True}}).encode()
+        self.send_response(200); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), Status).serve_forever()
+'''
+
+
+def _free_port():
+    import socket
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_slow_appium_start_waits_and_is_not_launched_twice(tmp_path, monkeypatch):
+    from core import appium_server
+
+    script = tmp_path / "fake_appium.py"
+    script.write_text(FAKE_APPIUM)
+    monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
+    monkeypatch.setattr(appium_server, "find_appium_command", lambda: [sys.executable, str(script), "1.5"])
+    server = appium_server.AppiumServer(f"http://127.0.0.1:{_free_port()}")
+    ticks = []
+    try:
+        assert not server.start(wait_seconds=0.5, on_wait=ticks.append)  # still starting: times out
+        first = server.process
+        assert first is not None and first.poll() is None
+        assert server.start(wait_seconds=10)  # "Retry": keeps waiting for the same process
+        assert server.process is first and ticks
+    finally:
+        server.stop()
+
+
+def test_stale_driver_manifest_is_reset(tmp_path):
+    from core.appium_server import repair_driver_manifest
+
+    cache = tmp_path / "home" / "node_modules" / ".cache" / "appium"
+    cache.mkdir(parents=True)
+    manifest = cache / "extensions.yaml"
+    real = tmp_path / "home" / "node_modules" / "appium-uiautomator2-driver"
+    real.mkdir()
+    manifest.write_text(f"drivers:\n  uiautomator2:\n    installPath: {real}\n")
+    assert not repair_driver_manifest(tmp_path / "home") and manifest.exists()  # paths fine: keep it
+    manifest.write_text("drivers:\n  uiautomator2:\n    installPath: D:\\a\\build\\appium-home\\node_modules\\x\n")
+    assert repair_driver_manifest(tmp_path / "home") and not manifest.exists()  # build machine path: reset
+    assert not repair_driver_manifest(tmp_path / "missing")
+
+
+def test_self_test_passes_from_source(capsys):
+    import main
+
+    assert main.self_test() == 0
+    assert '"appium_client": "ok: Appium-Python-Client' in capsys.readouterr().out

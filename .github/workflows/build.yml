@@ -89,6 +89,16 @@ jobs:
           foreach ($path in "configs", "README.txt", "_internal/assets/icon.ico", "_internal/default_configs") {
             if (-not (Test-Path "dist/DeviceAutomation/$path")) { throw "Missing from build: $path" }
           }
+          # Run the packaged app's self-test: imports what a phone connection needs (catches
+          # modules or package metadata PyInstaller left out) and checks the bundled tools.
+          $proc = Start-Process dist/DeviceAutomation/DeviceAutomation.exe -ArgumentList "--self-test" -Wait -PassThru
+          Get-Content dist/DeviceAutomation/logs/self-test.txt
+          if ($proc.ExitCode -ne 0) { throw "Packaged app self-test failed (exit $($proc.ExitCode))" }
+          if ($env:BUNDLE_APPIUM -eq "true") {
+            $report = Get-Content dist/DeviceAutomation/logs/self-test.txt -Raw | ConvertFrom-Json
+            if ($report.checks.bundled_tools -notmatch "node.exe") { throw "Bundled Appium not found by the app" }
+          }
+          Remove-Item -Recurse -Force dist/DeviceAutomation/logs
       - name: Install Inno Setup
         shell: pwsh
         run: |
