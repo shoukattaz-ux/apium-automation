@@ -117,19 +117,29 @@ jobs:
           $setup = (Get-ChildItem dist/installer/*.exe | Select-Object -First 1).FullName
           $app = "$env:LOCALAPPDATA\Programs\Device Automation Dashboard"
           function Install($log) {
-            $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/CURRENTUSER", "/NORESTART", "/LOG=$log" -Wait -PassThru
+            # WaitForExit, not Start-Process -Wait: -Wait also waits for every child process.
+            $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/CURRENTUSER", "/NORESTART", "/LOG=$log" -PassThru
+            if (-not $p.WaitForExit(300000)) { Get-Content $log -Tail 40; throw "Install did not finish in 5 minutes" }
             if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; throw "Install failed (exit $($p.ExitCode))" }
+            "Installed ($log)"
           }
           Install "$env:RUNNER_TEMP\install1.log"
           if (Test-Path "$app\platform-tools\adb.exe") {
-            Start-Process "$app\platform-tools\adb.exe" -ArgumentList "start-server" -Wait -WindowStyle Hidden
-            $running = Get-Process adb -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$app\*" }
+            # Not -Wait: the adb server it starts keeps running in the background (that's the point).
+            Start-Process "$app\platform-tools\adb.exe" -ArgumentList "start-server" -WindowStyle Hidden
+            $running = $null
+            for ($i = 0; $i -lt 30 -and -not $running; $i++) {
+              Start-Sleep -Seconds 1
+              $running = Get-Process adb -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$app\*" }
+            }
             if (-not $running) { throw "Test setup: adb server did not start" }
-            "adb server running from the install folder (pid $($running.Id))"
+            "adb server running from the install folder (pid $($running.Id -join ', '))"
           }
           Install "$env:RUNNER_TEMP\install2.log"
           "Upgrade over a running install succeeded"
-          Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          $u = Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -PassThru
+          if (-not $u.WaitForExit(300000)) { throw "Uninstall did not finish in 5 minutes" }
+          Start-Sleep -Seconds 3  # the uninstaller hands off to a temporary copy of itself
           if (Get-Process adb -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$app\*" }) { throw "adb still running after uninstall" }
       - name: Zip portable build
         shell: pwsh
