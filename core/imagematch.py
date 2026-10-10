@@ -184,3 +184,88 @@ def similarity(screen: np.ndarray, template: np.ndarray, bounds: tuple[int, int,
             (found_w, found_h), Image.BILINEAR), dtype=np.float32) / 255.0
     scores = ncc_map(region, template)
     return float(scores.max()) if scores is not None else 0.0
+
+
+# ------------------------------------------------------------------ look-alikes
+# Elements that look the same except for a small part (cloned apps with a numbered badge,
+# list rows that differ in one word) can't be told apart by the whole picture: two clones are
+# ~95% alike. At pick time we find the part where the picked element differs from its
+# look-alikes (the "mark") and keep only that; at run time each candidate's mark area is
+# compared with it.
+
+# Measured on 49 clone icons differing only in a badge number: the right one scores 1.00 (the
+# phone draws identical icons pixel for pixel), the closest wrong one up to 0.91.
+MARK_THRESHOLD = 0.95       # the candidate's mark looks like the picked one...
+MARK_MARGIN = 0.04          # ...and clearly better than the next best candidate
+MIN_MARK_FRACTION = 0.003   # differences smaller than this share of the element are noise
+
+
+def _crop_gray(shot: np.ndarray, bounds: tuple[int, int, int, int], size: tuple[int, int] | None = None) -> np.ndarray:
+    left, top, right, bottom = (max(0, bounds[0]), max(0, bounds[1]),
+                                min(shot.shape[1], bounds[2]), min(shot.shape[0], bounds[3]))
+    region = shot[top:bottom, left:right]
+    if size and region.size and (region.shape[1], region.shape[0]) != size:
+        region = np.asarray(Image.fromarray((region * 255).astype(np.uint8)).resize(size, Image.BILINEAR),
+                            dtype=np.float32) / 255.0
+    return region
+
+
+def distinguishing_mark(screenshot_png: bytes, target: tuple[int, int, int, int],
+                        alikes: list[tuple[int, int, int, int]], layout: tuple[int, int]
+                        ) -> tuple[bytes, tuple[float, float, float, float]] | None:
+    """The part of ``target`` that differs from its look-alikes: (PNG of that part, its box as
+    fractions of the element). None if they look identical (nothing to tell them apart by).
+    Bounds are layout coordinates."""
+    shot = load_gray(screenshot_png)
+    scale = shot.shape[1] / layout[0] if layout[0] else 1.0
+
+    def scaled(bounds):
+        return tuple(int(round(v * scale)) for v in bounds)
+
+    picked = _crop_gray(shot, scaled(target))
+    if picked.size == 0 or not alikes:
+        return None
+    size = (picked.shape[1], picked.shape[0])
+    diffs = [np.abs(picked - _crop_gray(shot, scaled(other), size)) for other in alikes]
+    diff = np.mean([d for d in diffs if d.shape == picked.shape], axis=0)
+    # Smooth so a digit's strokes form one region, then keep what clearly stands out.
+    kernel = max(3, min(size) // 12)
+    smooth = np.asarray(Image.fromarray((np.clip(diff, 0, 1) * 255).astype(np.uint8)).resize(
+        (max(1, size[0] // kernel), max(1, size[1] // kernel)), Image.BOX).resize(size, Image.BILINEAR),
+        dtype=np.float32) / 255.0
+    threshold = max(0.06, float(smooth.max()) * 0.5)
+    mask = smooth > threshold
+    if mask.mean() < MIN_MARK_FRACTION:
+        return None
+    rows, cols = np.where(mask)
+    pad = max(2, kernel // 2)
+    top, bottom = max(0, rows.min() - pad), min(size[1], rows.max() + pad + 1)
+    left, right = max(0, cols.min() - pad), min(size[0], cols.max() + pad + 1)
+    patch = picked[top:bottom, left:right]
+    out = io.BytesIO()
+    Image.fromarray((patch * 255).astype(np.uint8)).save(out, "PNG")
+    box = (left / size[0], top / size[1], right / size[0], bottom / size[1])
+    return out.getvalue(), box
+
+
+def mark_score(shot: np.ndarray, mark: np.ndarray, bounds: tuple[int, int, int, int],
+               box: tuple[float, float, float, float]) -> float:
+    """How much the mark area of an element at ``bounds`` (screenshot pixels) looks like ``mark``."""
+    width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+    area = (int(bounds[0] + box[0] * width), int(bounds[1] + box[1] * height),
+            int(bounds[0] + box[2] * width), int(bounds[1] + box[3] * height))
+    if area[2] - area[0] < 2 or area[3] - area[1] < 2:
+        return 0.0
+    return similarity(shot, mark, area, pad=3)
+
+
+def pick_by_mark(scores: list[float]) -> int | None:
+    """Index of the clear winner among candidates' mark scores, or None if none is clearly it."""
+    if not scores:
+        return None
+    ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+    best = scores[ranked[0]]
+    runner_up = scores[ranked[1]] if len(ranked) > 1 else -1.0
+    if best >= MARK_THRESHOLD and best - runner_up >= MARK_MARGIN:
+        return ranked[0]
+    return None

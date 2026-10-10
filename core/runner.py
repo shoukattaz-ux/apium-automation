@@ -27,7 +27,9 @@ from .history import RunRecorder, StepRecord
 from .inspector import element_at, parse_page_source
 from . import paths
 from .settings import default_timeout
-from .targeting import Candidate, anchor_xpath, check, choose, layout_size, visible_and_settled
+from .targeting import (
+    LARGE_FRACTION, Candidate, anchor_xpath, check, choose, layout_size, screen_fraction, visible_and_settled,
+)
 from .schema import (
     ACTIONS, LOCATOR_ACTIONS, ScriptError, describe_step, format_path, load_script, render,
     script_roles,
@@ -37,6 +39,7 @@ log = logging.getLogger(__name__)
 
 SETTLE_SECONDS = 0.3      # pause between the two looks that confirm an element isn't moving
 SETTLE_GRACE_LOOKS = 3    # extra looks allowed past the timeout to finish that check
+SCROLL_LOOK_SECONDS = 1.5 # with scroll_search: how long to look before scrolling on
 
 
 @dataclass
@@ -491,6 +494,7 @@ class ScriptRunner:
                 return None
             raise
         if action == "click":
+            self._refuse_large(step, session, found)
             session.click_candidate(found)
         elif action == "copy_text":
             copied = session.text_of(found)
@@ -553,6 +557,8 @@ class ScriptRunner:
         reason = "no locator matched"
         settling: tuple[int, int, int, int] | None = None
         grace = SETTLE_GRACE_LOOKS
+        scrolls_left = int(step.get("scroll_search") or 0)
+        next_scroll = time.monotonic() + SCROLL_LOOK_SECONDS
 
         def note(message: str) -> None:
             if not quiet and message not in noted:
@@ -589,6 +595,8 @@ class ScriptRunner:
                         invalid.add(index)
                         note(f"✗ {name} is not a valid locator ({locator_type}={locator_value}) — skipped")
                         continue
+                    if target and target.get("mark") and matches:
+                        matches = self._tell_apart(session, target, matches, size, name, note)
                     chosen, why = choose(target, matches, size)
                     if chosen is None:
                         if matches:
@@ -624,6 +632,17 @@ class ScriptRunner:
                             self._log_choice(winner, locators, invalid, target, session)
                             return winner.candidate
                         settling, reason, winner = bounds, why, None
+            if (winner is None and on_screen and settling is None and scrolls_left
+                    and time.monotonic() >= next_scroll):
+                # Not on screen (e.g. further down a long list): scroll and look again.
+                scrolls_left -= 1
+                done = int(step.get("scroll_search") or 0) - scrolls_left
+                self.log(f"    ↓ not on screen — scrolling to look for it ({done}/{step.get('scroll_search')})",
+                         session)
+                session.scroll("down", 1)
+                next_scroll = time.monotonic() + SCROLL_LOOK_SECONDS
+                deadline = max(deadline, next_scroll + SCROLL_LOOK_SECONDS)
+                continue
             expired = time.monotonic() >= deadline
             if expired and (settling is None or grace <= 0):
                 raise ElementNotFound(f"Element not found within {timeout:g}s: {reason}")
@@ -680,6 +699,44 @@ class ScriptRunner:
             best_group.voters.append(name)
         elif best_group is not None:
             note(f"✗ {name} doesn't look like what the locators found ({best:.0%} similar)")
+
+    def _tell_apart(self, session: DeviceSession, target: dict, matches: list, size, name: str,
+                    note: Callable[[str], None]) -> list:
+        """Keep the one look-alike whose distinguishing mark (e.g. a clone's badge number)
+        matches the picked element's; none if no candidate clearly does."""
+        from . import imagematch
+
+        mark = target["mark"]
+        template = self._template(mark.get("image", ""))
+        if template is None:
+            note(f"✗ the picked element's distinguishing picture {mark.get('image')} is missing")
+            return []
+        shot = self._screenshot_gray(session)
+        scale = shot.shape[1] / size[0] if size and size[0] else 1.0
+        box = tuple(mark.get("box") or (0, 0, 1, 1))
+        scores = []
+        for candidate in matches:
+            bounds = candidate.bounds
+            scores.append(imagematch.mark_score(shot, template, tuple(int(round(v * scale)) for v in bounds), box)
+                          if bounds else 0.0)
+        winner = imagematch.pick_by_mark(scores)
+        if winner is None:
+            best = max(scores) if scores else 0.0
+            note(f"✗ {name}: none of its {len(matches)} look-alike(s) has the picked one's distinguishing "
+                 f"mark (best {best:.0%})" if best < imagematch.MARK_THRESHOLD else
+                 f"✗ {name}: several look-alikes match the distinguishing mark — not guessing")
+            return []
+        return [matches[winner]]
+
+    def _refuse_large(self, step: dict, session: DeviceSession, found: Candidate) -> None:
+        """A click taps an element's centre: on a big container that is somewhere else entirely."""
+        if step.get("allow_large"):
+            return
+        fraction = screen_fraction(found.bounds, session.window_size())
+        if fraction > LARGE_FRACTION:
+            raise DeviceError(f"Refusing to tap {found.label()}: it covers {fraction:.0%} of the screen, so its "
+                              "centre is probably not what was picked. Re-pick the element, or tick "
+                              "“Allow tapping a large area” on this step.")
 
     @staticmethod
     def _screen_matches(session: DeviceSession, screen: dict) -> tuple[bool, str]:

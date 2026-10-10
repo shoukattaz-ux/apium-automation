@@ -26,7 +26,9 @@ from core import paths
 from core.appium_server import is_server_running
 from core.devices import DeviceError, connection_lost, friendly_error
 from core.inspector import UiElement, clickable_target, element_at, parse_page_source, suggest_locators
-from core.targeting import fingerprint, layout_size, screen_signature
+from core.targeting import (
+    LARGE_FRACTION, fingerprint, layout_size, look_alikes, screen_fraction, screen_signature,
+)
 
 from .qtutil import safe_emit
 from .theme import ACCENT
@@ -381,6 +383,18 @@ class InspectorWindow(QWidget):
             self.title.setText("Nothing selected")
             return
         self.title.setText(element.label())
+        layout = layout_size(self.elements)
+        notes = []
+        if screen_fraction(element.bounds, layout) > LARGE_FRACTION:
+            notes.append("⚠ This is a large container — a click taps its centre, not where you pointed. "
+                         "Pick the item itself.")
+        alikes = look_alikes(element, self.elements)
+        if alikes:
+            notes.append(f"{len(alikes)} look-alike(s) on screen — the step will tell them apart by the part "
+                         "that differs (e.g. a badge number).")
+        self.title.setToolTip("\n".join(notes))
+        if notes:
+            self.status.setText("  ".join(notes))
         for name in ATTRIBUTES:
             value = element.attrs.get(name, "")
             if value:
@@ -419,6 +433,13 @@ class InspectorWindow(QWidget):
             return [chosen]
         unique.sort(key=lambda s: (s.fragile, (s.locator_type, s.locator_value) != chosen))
         ranked = [(s.locator_type, s.locator_value) for s in unique if not s.fragile]
+        if self.selected is not None and self._distinguishing_mark():
+            # A locator shared by exactly the look-alike group finds all of them; the mark then
+            # picks the right one. Stable, unlike "the 17th DualSpace on screen".
+            group = len(look_alikes(self.selected, self.elements)) + 1
+            shared = [(s.locator_type, s.locator_value) for s in self.suggestions
+                      if not s.unique and not s.fragile and s.matches == group]
+            ranked = shared + [loc for loc in ranked if loc not in shared]
         picture = self._picture()
         if picture:  # after the stable locators, before the positional ones
             ranked.append(("image", picture))
@@ -467,11 +488,44 @@ class InspectorWindow(QWidget):
         return step
 
     def _safety_checks(self) -> dict:
-        """Fingerprint of the selected element and the screen it's on, checked before acting at run time."""
+        """Fingerprint of the selected element and the screen it's on, checked before acting at run time.
+
+        If the element has look-alikes (e.g. cloned apps that differ only in a badge number),
+        the fingerprint also gets the part of its picture where it differs from them.
+        """
         if self.selected is None or not self.elements:
             return {}
-        return {"target": fingerprint(self.selected, self.elements),
-                "screen": screen_signature(self.selected, self.elements)}
+        target = fingerprint(self.selected, self.elements)
+        mark = self._distinguishing_mark()
+        if mark:
+            target["mark"] = mark
+        return {"target": target, "screen": screen_signature(self.selected, self.elements)}
+
+    def _distinguishing_mark(self) -> dict | None:
+        from core import imagematch
+
+        element = self.selected
+        alikes = look_alikes(element, self.elements) if element is not None else []
+        if not alikes or not self.png:
+            return None
+        key = (element.bounds, len(alikes))
+        if getattr(self, "_mark_cache", (None, None))[0] == key:
+            return self._mark_cache[1]
+        mark = None
+        try:
+            found = imagematch.distinguishing_mark(self.png, element.bounds, [a.bounds for a in alikes],
+                                                   layout_size(self.elements))
+            if found:
+                patch, box = found
+                mark = {"image": imagematch.save_template(patch, paths.configs_dir() / "images"),
+                        "box": [round(float(v), 4) for v in box]}
+        except (OSError, ValueError) as exc:
+            log.warning("Could not save the distinguishing picture: %s", exc)
+        if mark is None:
+            self.status.setText("⚠ These look-alikes look identical — nothing tells this one apart. "
+                                "Use Open App with the app's package if you can.")
+        self._mark_cache = (key, mark)
+        return mark
 
     def _fallback_position(self) -> dict:
         """The selected element's centre as percent of the screen, as a Click step's backup tap."""

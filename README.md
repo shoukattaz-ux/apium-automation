@@ -163,6 +163,19 @@ fingerprint). The element with the most votes is used when it has at least
 `min_agree` votes (default: 2 for steps with three or more locators, else 1)
 and no other element ties with it; outvoted locators are named in the log.
 
+**Look-alikes.** When the picked element has look-alikes on screen (same type,
+text and size — e.g. 50 cloned apps all named "DualSpace" that differ only in a
+badge number drawn into the icon), the picker finds the part of its picture
+where it differs from them and saves it (`target.mark`). A locator shared by
+the group (`text=DualSpace`) then finds all of them and the mark picks the
+right one; if none clearly matches, the step refuses rather than guess. Steps
+can also scroll to look for an element (`scroll_search`: up to N scrolls).
+
+**Large containers.** The picker never swaps a label for a much bigger
+clickable parent, and a Click on an element covering more than 40% of the
+screen is refused (it would tap the centre, i.e. something else) unless the
+step sets `allow_large`.
+
 **Pictures.** The picker also saves the element's image in `configs/images`
 and adds it as an `image` locator. The picture votes for the found element
 that still looks like it, and if no locator settles on the element, a Click
