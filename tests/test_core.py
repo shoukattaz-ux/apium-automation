@@ -102,8 +102,8 @@ def test_stop_interrupts_run():
 def test_retries_then_success_and_on_fail_stop(tmp_path):
     session = FakeSession("dev1", {"id=btn": ""}, fail_times={"id=btn": 2})
     script = {"name": "r", "steps": [
-        {"action": "click", "locator_type": "id", "locator_value": "btn", "retries": 2},
-        {"action": "click", "locator_type": "id", "locator_value": "nope", "on_fail": "stop"},
+        {"action": "click", "locator_type": "id", "locator_value": "btn", "retries": 2, "timeout_seconds": 0},
+        {"action": "click", "locator_type": "id", "locator_value": "nope", "on_fail": "stop", "timeout_seconds": 0},
         {"action": "open_app", "package": "never"},
     ]}
     recorder = RunRecorder("r", {"device": "dev1"}, base_dir=tmp_path)
@@ -230,8 +230,6 @@ def test_manager_workflow_locks_phones_and_repeats(tmp_path):
     ]}
     with pytest.raises(ScriptError):
         manager.start("s1", script)  # needs a phone per role
-    with pytest.raises(ScriptError):
-        manager.start_workflow({"A": "s1", "B": "s1"}, script)
     assert manager.start_workflow({"A": "s1", "B": "s2"}, script, repeat=2)
     assert manager.is_running("s2")
     assert not manager.start("s2", SCRIPT)  # busy as part of the workflow
@@ -240,6 +238,14 @@ def test_manager_workflow_locks_phones_and_repeats(tmp_path):
     runs = list_runs(tmp_path)
     assert len(runs) == 2 and runs[0][1].devices == {"A": "s1", "B": "s2"}
     assert manager.status.get("s2")["state"] == RunState.COMPLETED
+
+    # One phone may play both roles: one session, steps in order.
+    phones["s1"].screen["id=in"] = ""
+    phones["s1"].calls.clear()
+    assert manager.start_workflow({"A": "s1", "B": "s1"}, script)
+    assert _wait_idle(manager, ["s1"])
+    assert ("paste", "id=in", "x") in phones["s1"].calls  # copied as role A, pasted as role B
+    assert manager.status.get("s1")["state"] == RunState.COMPLETED
 
 
 def test_manager_stop_ends_repeat_forever(tmp_path):
@@ -335,3 +341,101 @@ def test_bundled_examples_are_valid():
     assert len(entries) >= 2
     for entry in entries:
         load_script(entry.path)
+
+
+FB_LITE_TABS = """<?xml version='1.0' encoding='UTF-8'?>
+<hierarchy index="0" rotation="0" width="400" height="800">
+  <android.widget.FrameLayout bounds="[0,0][400,800]">
+    <android.view.ViewGroup bounds="[0,0][400,60]">
+      <android.view.ViewGroup clickable="true" bounds="[0,0][100,60]">
+        <android.view.View content-desc="Home" bounds="[30,10][70,50]"/>
+      </android.view.ViewGroup>
+      <android.view.ViewGroup clickable="true" bounds="[100,0][200,60]">
+        <android.view.ViewGroup bounds="[110,5][190,55]">
+          <android.view.View content-desc="Video" bounds="[130,10][170,50]"/>
+        </android.view.ViewGroup>
+      </android.view.ViewGroup>
+    </android.view.ViewGroup>
+  </android.widget.FrameLayout>
+</hierarchy>"""
+
+
+def test_unlabelled_element_is_found_through_its_labelled_child():
+    import xml.etree.ElementTree as ET
+
+    elements = parse_page_source(FB_LITE_TABS)
+    tab = next(e for e in elements if e.bounds == (100, 0, 200, 60))
+    suggestions = suggest_locators(tab, elements)
+    best = suggestions[0]
+    assert best == best_locator(tab, elements)
+    assert best.locator_value == '//*[@content-desc="Video"]/../..' and not best.fragile
+    assert suggestions[-1].fragile and suggestions[-1].locator_value == tab.xpath
+    # The anchored path really points at the tab.
+    root = ET.fromstring(FB_LITE_TABS.split("?>", 1)[1])
+    found = root.findall(".//*[@content-desc='Video']/../..")
+    assert [n.attrib["bounds"] for n in found] == ["[100,0][200,60]"]
+
+
+def test_click_falls_back_to_saved_position():
+    session = FakeSession("S1", screen={})
+    lines = []
+    script = {"name": "fallback", "steps": [
+        {"action": "click", "locator_type": "xpath", "locator_value": "//gone", "timeout_seconds": 0,
+         "fallback_x": 50, "fallback_y": 25},
+        {"action": "click", "locator_type": "xpath", "locator_value": "//gone", "timeout_seconds": 0},
+    ]}
+    result = ScriptRunner(session, script, on_log=lambda *args: lines.append(str(args[-1]))).run()
+    assert ("tap", 200, 200) in session.calls  # 50% × 400, 25% × 800
+    assert any("tapped its saved position (50%, 25%)" in line for line in lines)
+    assert len(result.skipped_steps) == 1  # the step without a fallback is still skipped
+
+    assert validate_step({"action": "click", "locator_type": "id", "locator_value": "x", "fallback_x": 5}) == {
+        "fallback_y": "Set both X and Y for the backup tap, or neither"}
+
+
+def test_backup_locators_are_tried_in_order():
+    session = FakeSession("S1", screen={"text=Video": "Video", "xpath=//backup": "b"})
+    lines = []
+    script = {"name": "alts", "steps": [
+        {"action": "click", "locator_type": "id", "locator_value": "gone", "timeout_seconds": 0,
+         "alternatives": [{"locator_type": "xpath", "locator_value": "//also-gone"},
+                          {"locator_type": "text", "locator_value": "Video"},
+                          {"locator_type": "xpath", "locator_value": "//backup"}]},
+        {"action": "if_exists", "locator_type": "id", "locator_value": "gone", "timeout_seconds": 0,
+         "alternatives": [{"locator_type": "xpath", "locator_value": "//backup"}],
+         "then": [{"action": "press_key", "key": "back"}]},
+        {"action": "click", "locator_type": "id", "locator_value": "gone", "timeout_seconds": 0,
+         "alternatives": [{"locator_type": "id", "locator_value": "nope"}], "fallback_x": 10, "fallback_y": 10},
+    ]}
+    result = ScriptRunner(session, script, on_log=lambda *args: lines.append(str(args[-1]))).run()
+    assert ("click", "text=Video") in session.calls and ("click", "xpath=//backup") not in session.calls
+    assert any("found with backup 3: text=Video" in line for line in lines)
+    assert ("key", "back") in session.calls
+    assert ("tap", 40, 80) in session.calls  # no locator matched: backup position
+    assert not result.skipped_steps
+
+    step = {"action": "click", "locator_type": "android uiautomator",
+            "locator_value": "/hierarchy/android.widget.FrameLayout/android.view.ViewGroup[2]"}
+    assert "XPath" in validate_step(step)["locator_value"]
+    assert "XPath" in validate_step({"action": "click", "locator_type": "xpath", "locator_value": "//a",
+                                     "alternatives": [{"locator_type": "id", "locator_value": "(//a)[1]"}]}
+                                    )["alternatives"]
+    saved = normalize_step({"action": "copy_text", "locator_type": "id", "locator_value": "a", "save_as": "x",
+                            "alternatives": [{"locator_type": "text", "locator_value": " b "}, {"locator_type": "id"}]})
+    assert saved["alternatives"] == [{"locator_type": "text", "locator_value": "b"}]
+    assert "+1 backup locator" in describe_step(saved)
+
+
+def test_picker_offers_every_locator_type():
+    elements = parse_page_source(PAGE_SOURCE)
+    order = element_at(elements, 100, 70)
+    found = suggest_locators(order, elements)
+    assert {s.locator_type for s in found} == {"id", "text", "android uiautomator", "xpath"}
+    assert all(s.unique for s in found) and [s.fragile for s in found][-2:] == [True, True]
+    assert ("android uiautomator", 'new UiSelector().resourceId("com.shop:id/order")') in \
+        [(s.locator_type, s.locator_value) for s in found]
+    # Look-alike rows: positional locators are the unique ones, the plain id is not.
+    item = element_at(elements, 100, 290)
+    unique = [(s.locator_type, s.locator_value) for s in suggest_locators(item, elements) if s.unique]
+    assert ("android uiautomator", 'new UiSelector().resourceId("com.shop:id/item").instance(1)') in unique
+    assert ("id", "com.shop:id/item") not in unique

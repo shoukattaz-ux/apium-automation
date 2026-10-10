@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -27,12 +28,16 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 from .devices import DEFAULT_APPIUM_URL
 from .paths import app_dir, logs_dir
 
 log = logging.getLogger(__name__)
+
+# First start can be slow: antivirus scans ~400 Node packages the first time.
+START_TIMEOUT_SECONDS = 150
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
@@ -63,7 +68,7 @@ def find_appium_command() -> list[str] | None:
 def server_environment() -> dict[str, str]:
     """Environment for a server we start: point Appium at the bundled drivers and adb."""
     env = dict(os.environ)
-    bundled_home = app_dir() / "appium-server" / "appium-home"
+    bundled_home = bundled_appium_home()
     if bundled_home.is_dir():
         env["APPIUM_HOME"] = str(bundled_home)
     adb = "adb.exe" if sys.platform == "win32" else "adb"
@@ -71,6 +76,37 @@ def server_environment() -> dict[str, str]:
         # UiAutomator2 finds adb through ANDROID_HOME/platform-tools.
         env["ANDROID_HOME"] = str(app_dir())
     return env
+
+
+def bundled_appium_home() -> Path:
+    return app_dir() / "appium-server" / "appium-home"
+
+
+def repair_driver_manifest(home: Path) -> bool:
+    """Delete Appium's driver list if it points at folders that don't exist here.
+
+    Appium records each driver's absolute install path in
+    ``node_modules/.cache/appium/extensions.yaml``. In the bundle that path is
+    the build machine's, so on the user's PC the UiAutomator2 driver would fail
+    to load. Without the file Appium rebuilds it on start with the real paths.
+    Returns True if the file was removed.
+    """
+    manifest = Path(home) / "node_modules" / ".cache" / "appium" / "extensions.yaml"
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    for match in re.finditer(r"^\s*installPath:\s*(.+?)\s*$", text, re.MULTILINE):
+        install_path = match.group(1).strip().strip("'\"")
+        if not Path(install_path).exists():
+            try:
+                manifest.unlink()
+                log.info("Removed stale Appium driver list (pointed at %s); Appium will rebuild it", install_path)
+                return True
+            except OSError as exc:
+                log.warning("Appium driver list points at %s but could not be reset: %s", install_path, exc)
+                return False
+    return False
 
 
 class AppiumServer:
@@ -81,13 +117,23 @@ class AppiumServer:
         self.process: subprocess.Popen | None = None
         self._log_file = None
 
-    def start(self, wait_seconds: float = 40) -> bool:
-        """Start Appium and wait until it answers. Returns True once it is up."""
+    def start(self, wait_seconds: float = START_TIMEOUT_SECONDS,
+              on_wait: Callable[[float], None] | None = None) -> bool:
+        """Start Appium (or keep waiting for one we already started) until it answers.
+
+        ``on_wait(seconds_elapsed)`` is called about twice a second so a UI can
+        stay responsive. The first start on a PC can be slow while antivirus
+        scans Appium's files, hence the generous default timeout.
+        """
         if is_server_running(self.url):
             return True
+        if self.process is not None and self.process.poll() is None:
+            return self._wait(wait_seconds, on_wait)  # still starting from last time: don't launch a second one
         command = find_appium_command()
         if command is None:
             return False
+        if bundled_appium_home().is_dir():
+            repair_driver_manifest(bundled_appium_home())
         parsed = urlparse(self.url)
         command += ["--address", parsed.hostname or "127.0.0.1", "--port", str(parsed.port or 4723)]
         logs_dir().mkdir(parents=True, exist_ok=True)
@@ -100,14 +146,22 @@ class AppiumServer:
         except OSError as exc:
             log.error("Could not start Appium: %s", exc)
             return False
-        deadline = time.monotonic() + wait_seconds
-        while time.monotonic() < deadline:
+        return self._wait(wait_seconds, on_wait)
+
+    def _wait(self, wait_seconds: float, on_wait: Callable[[float], None] | None) -> bool:
+        started = time.monotonic()
+        while time.monotonic() - started < wait_seconds:
             if self.process.poll() is not None:
                 log.error("Appium exited with code %s (see logs/appium-server.log)", self.process.returncode)
+                self.process = None
                 return False
             if is_server_running(self.url, timeout=1):
+                log.info("Appium answered after %.0fs", time.monotonic() - started)
                 return True
+            if on_wait:
+                on_wait(time.monotonic() - started)
             time.sleep(0.5)
+        log.warning("Appium did not answer within %.0fs (it may still be starting)", wait_seconds)
         return False
 
     def stop(self) -> None:

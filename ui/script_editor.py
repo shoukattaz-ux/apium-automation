@@ -20,11 +20,11 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QFontDatabase, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QApplication, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -32,7 +32,8 @@ from core import paths
 from core.devices import DeviceError, list_installed_packages
 from core.settings import default_timeout
 from core.schema import (
-    ACTION_LABELS, ACTIONS, BLOCK_LABELS, COMMON_FIELDS, DEFAULT_TIMEOUT_SECONDS, FieldSpec, ScriptError, describe_step, format_path,
+    ACTION_LABELS, ACTIONS, BLOCK_LABELS, COMMON_FIELDS, DEFAULT_TIMEOUT_SECONDS, LOCATOR_ACTIONS, LOCATOR_TYPES,
+    MAX_AGREE, TITLE_FIELD, FieldSpec, ScriptError, describe_step, format_path, roles_to_titles,
     safe_filename, save_script, script_roles, script_variables, validate_script, validate_step,
 )
 
@@ -61,7 +62,111 @@ def run(device):
     device.scroll("down", times=2)
 '''
 
-PickLocator = Callable[[Callable[[str, str], None]], None]
+# Opens the element picker; it calls back with what was picked: {"locators": [...] best first,
+# "position": (x %, y %) or None, "target": fingerprint, "screen": screen signature}.
+PickLocator = Callable[[Callable[[dict], None]], None]
+
+
+class LocatorListEditor(QWidget):
+    """Backup locators for a step: tried in order when the main locator doesn't match."""
+
+    def __init__(self, locators: list[dict] | None = None, parent=None):
+        super().__init__(parent)
+        self.list = QListWidget()
+        self.list.setMaximumHeight(130)
+        self.list.setIconSize(QSize(48, 32))
+        self.list.setToolTip("Tried in this order when the main locator doesn't find the element")
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(LOCATOR_TYPES)
+        self.type_combo.setCurrentText("xpath")
+        self.value_edit = QLineEdit()
+        self.value_edit.setPlaceholderText("Another way to find the same element")
+        self.value_edit.returnPressed.connect(self._add)
+        add = QPushButton("＋ Add")
+        add.clicked.connect(self._add)
+        entry = QHBoxLayout()
+        entry.addWidget(self.type_combo)
+        entry.addWidget(self.value_edit, 1)
+        entry.addWidget(add)
+        self.up = QPushButton("↑")
+        self.down = QPushButton("↓")
+        self.remove = QPushButton("Remove")
+        self.promote = QPushButton("Make main")
+        self.promote.setToolTip("Swap this one with the main locator")
+        self.up.clicked.connect(lambda: self._move(-1))
+        self.down.clicked.connect(lambda: self._move(1))
+        self.remove.clicked.connect(self._remove)
+        buttons = QHBoxLayout()
+        for button in (self.up, self.down, self.remove, self.promote):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self.list)
+        layout.addLayout(buttons)
+        layout.addLayout(entry)
+        self.list.currentRowChanged.connect(lambda _: self._update_buttons())
+        self.set_locators(locators or [])
+
+    def set_locators(self, locators: list[dict]) -> None:
+        self.list.clear()
+        for locator in locators:
+            self._append(locator["locator_type"], str(locator["locator_value"]))
+        self._update_buttons()
+
+    def locators(self) -> list[dict]:
+        return [dict(zip(("locator_type", "locator_value"), self.list.item(i).data(Qt.UserRole)))
+                for i in range(self.list.count())]
+
+    def _append(self, locator_type: str, locator_value: str) -> None:
+        number = self.list.count() + 2
+        if locator_type == "image":
+            item = QListWidgetItem(f"{number}.  picture of the element  ({locator_value})")
+            picture = paths.configs_dir() / locator_value
+            if picture.is_file():
+                item.setIcon(QIcon(str(picture)))
+            else:
+                item.setText(item.text() + "  — file missing")
+            item.setToolTip("Matched against the screen: it votes for the element that still looks like "
+                            "this, and can find it alone when every other locator fails")
+        else:
+            item = QListWidgetItem(f"{number}.  {locator_type}  =  {locator_value}")
+            item.setToolTip(locator_value)
+        item.setData(Qt.UserRole, (locator_type, locator_value))
+        self.list.addItem(item)
+
+    def _renumber(self) -> None:
+        self.set_locators(self.locators())
+
+    def _add(self) -> None:
+        value = self.value_edit.text().strip()
+        if value:
+            self._append(self.type_combo.currentText(), value)
+            self.value_edit.clear()
+            self._update_buttons()
+
+    def _move(self, delta: int) -> None:
+        row = self.list.currentRow()
+        locators = self.locators()
+        if 0 <= row + delta < len(locators):
+            locators.insert(row + delta, locators.pop(row))
+            self.set_locators(locators)
+            self.list.setCurrentRow(row + delta)
+
+    def _remove(self) -> None:
+        locators = self.locators()
+        row = self.list.currentRow()
+        if 0 <= row < len(locators):
+            del locators[row]
+            self.set_locators(locators)
+
+    def _update_buttons(self) -> None:
+        row = self.list.currentRow()
+        self.up.setEnabled(row > 0)
+        self.down.setEnabled(0 <= row < self.list.count() - 1)
+        self.remove.setEnabled(row >= 0)
+        self.promote.setEnabled(row >= 0)
 
 
 # ======================================================================= helpers
@@ -171,6 +276,41 @@ class StepDialog(QDialog):
         self.inputs: dict[str, QWidget] = {}
         self.errors: dict[str, QLabel] = {}
         self.result_step: dict | None = None
+        self.alternatives: LocatorListEditor | None = None
+        # Safety checks recorded by the element picker; kept across action changes.
+        self.target: dict | None = (step or {}).get("target") or None
+        self.screen_check: dict | None = (step or {}).get("screen") or None
+        self.verify_box = QCheckBox("Only act on the element I picked")
+        self.verify_box.setToolTip("A locator match only counts if it has the same type, id, text and "
+                                   "size as the element you picked; otherwise the next locator is tried")
+        self.verify_label = QLabel()
+        self.screen_box = QCheckBox("Only on the screen I picked it on")
+        self.screen_box.setToolTip("Waits until this app and one of these landmarks are showing; "
+                                   "otherwise the step fails instead of acting on the wrong screen")
+        self.screen_label = QLabel()
+        for label in (self.verify_label, self.screen_label):
+            label.setObjectName("Muted")
+            label.setWordWrap(True)
+        self.agree = QSpinBox()
+        self.agree.setRange(0, MAX_AGREE)
+        self.agree.setSpecialValueText("Auto")
+        self.agree.setValue(int((step or {}).get("min_agree") or 0))
+        self.agree.setToolTip("How many locators (the picture counts as one) must point at the same "
+                              "element before the step acts. Auto: 2 when the step has 3 or more, else 1. "
+                              "If two elements get the same number of votes, the step refuses.")
+        agree_row = QHBoxLayout()
+        agree_row.addWidget(QLabel("Locators that must agree"))
+        agree_row.addWidget(self.agree)
+        agree_row.addStretch(1)
+        self.verify_box.setChecked((step or {}).get("verify", True) is not False)
+        self.screen_box.setChecked((step or {}).get("check_screen", True) is not False)
+        self.safety = QGroupBox("Safety checks")
+        safety_layout = QVBoxLayout(self.safety)
+        for widget in (self.verify_box, self.verify_label, self.screen_box, self.screen_label):
+            safety_layout.addWidget(widget)
+        safety_layout.addLayout(agree_row)
+        self.alternatives_error = QLabel()
+        self.alternatives_error.setObjectName("Error")
 
         self.action_combo = QComboBox()
         group = None
@@ -205,12 +345,23 @@ class StepDialog(QDialog):
         top.addRow("Action", self.action_combo)
         top.addRow("", self.action_help)
         top.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # The fields scroll; Save / Cancel stay visible however tall the form gets.
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 8, 0)
+        body_layout.addLayout(top)
+        body_layout.addWidget(self.action_error)
+        body_layout.addWidget(self.form_host)
+        body_layout.addWidget(self.safety)
+        body_layout.addWidget(self.advanced)
+        body_layout.addStretch(1)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setWidget(body)
         layout = QVBoxLayout(self)
-        layout.addLayout(top)
-        layout.addWidget(self.action_error)
-        layout.addWidget(self.form_host)
-        layout.addWidget(self.advanced)
-        layout.addStretch(1)
+        layout.addWidget(self.scroll, 1)
         layout.addWidget(buttons)
 
         if step:
@@ -234,13 +385,74 @@ class StepDialog(QDialog):
         self.action_error.hide()
         spec = ACTIONS[self.action()]
         self.action_help.setText(spec.description)
+        self._add_field(self.form, TITLE_FIELD, step)
         for field_spec in spec.fields:
             self._add_field(self.form, field_spec, step)
+            if field_spec.name == "locator_value":
+                self._add_alternatives(step)
+        if self.action() not in LOCATOR_ACTIONS:
+            self.alternatives = None
+        self.safety.setVisible(self.action() in LOCATOR_ACTIONS)
+        self._show_safety()
         self.advanced.setVisible(spec.uses_device)
         if spec.uses_device:
             for field_spec in COMMON_FIELDS:
                 self._add_field(self.advanced_form, field_spec, step)
-        self.adjustSize()
+        self._fit_to_screen()
+
+    def _fit_to_screen(self) -> None:
+        """As tall as the fields need, but never taller than the screen (the fields scroll)."""
+        body = self.scroll.widget()
+        body.adjustSize()
+        wanted = body.sizeHint().height() + 90  # + buttons and margins
+        screen = self.screen() or QApplication.primaryScreen()
+        limit = int(screen.availableGeometry().height() * 0.9) if screen else 800
+        self.resize(max(self.width(), 640), min(wanted, limit))
+
+    def _add_alternatives(self, step: dict | None) -> None:
+        self.alternatives = LocatorListEditor((step or {}).get("alternatives") or [])
+        self.alternatives.promote.clicked.connect(self._promote_alternative)
+        self.alternatives_error = QLabel()
+        self.alternatives_error.setObjectName("Error")
+        self.alternatives_error.hide()
+        container = QWidget()
+        column = QVBoxLayout(container)
+        column.setContentsMargins(0, 0, 0, 6)
+        column.setSpacing(2)
+        column.addWidget(self.alternatives)
+        hint = QLabel("If the main locator doesn't find the element, these are tried in order. "
+                      "“Pick from screen…” fills them in for you.")
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        column.addWidget(hint)
+        column.addWidget(self.alternatives_error)
+        self.form.addRow("Backup locators (optional)", container)
+
+    def _show_safety(self) -> None:
+        from core.targeting import describe_screen, describe_target
+
+        self.verify_box.setEnabled(bool(self.target))
+        self.screen_box.setEnabled(bool(self.screen_check))
+        self.verify_label.setText(f"Picked: {describe_target(self.target)}" if self.target else
+                                  "Not recorded — use “Pick from screen…” to turn this on.")
+        self.screen_label.setText(f"Screen: {describe_screen(self.screen_check)}" if self.screen_check else
+                                  "Not recorded — use “Pick from screen…” to turn this on.")
+
+    def _promote_alternative(self) -> None:
+        editor = self.alternatives
+        row = editor.list.currentRow()
+        locators = editor.locators()
+        if not (0 <= row < len(locators)):
+            return
+        chosen = locators[row]
+        main = {"locator_type": self.inputs["locator_type"].currentText(),
+                "locator_value": self.inputs["locator_value"].text().strip()}
+        locators[row] = main
+        if not main["locator_value"]:
+            del locators[row]
+        self.inputs["locator_type"].setCurrentText(chosen["locator_type"])
+        self.inputs["locator_value"].setText(chosen["locator_value"])
+        editor.set_locators(locators)
 
     def _add_field(self, form: QFormLayout, spec: FieldSpec, step: dict | None) -> None:
         default = spec.default
@@ -300,6 +512,13 @@ class StepDialog(QDialog):
                 box.setSuffix(" s")
             elif "%" in spec.label:
                 box.setSuffix(" %")
+            if not spec.required and spec.default is None:
+                # Optional with no default: one step below the range means "not set".
+                box.setMinimum(float(spec.minimum or 0) - 1)
+                box.setSpecialValueText("Off")
+                box.setProperty("optional_unset", True)
+                box.setValue(float(value) if value not in (None, "") else box.minimum())
+                return box
             box.setValue(float(value) if value not in (None, "") else 0.0)
             return box
         if spec.name in ("value_from", "device"):
@@ -320,6 +539,8 @@ class StepDialog(QDialog):
         if isinstance(widget, QComboBox):
             return widget.currentText().strip()
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            if widget.property("optional_unset") and widget.value() == widget.minimum():
+                return ""
             return widget.value()
         return widget.text().strip()
 
@@ -329,9 +550,21 @@ class StepDialog(QDialog):
             self.inputs["package"].setText(dialog.selected_package())
 
     def _pick(self) -> None:
-        def apply(locator_type: str, locator_value: str) -> None:
+        def apply(capture: dict) -> None:
+            locators, position = capture["locators"], capture.get("position")
+            (locator_type, locator_value), backups = locators[0], locators[1:]
+            self.target = capture.get("target") or None
+            self.screen_check = capture.get("screen") or None
+            self.verify_box.setChecked(True)
+            self.screen_box.setChecked(True)
+            self._show_safety()
             self.inputs["locator_type"].setCurrentText(locator_type)
             self.inputs["locator_value"].setText(locator_value)
+            if self.alternatives is not None:
+                self.alternatives.set_locators([{"locator_type": t, "locator_value": v} for t, v in backups])
+            if position and "fallback_x" in self.inputs:
+                self.inputs["fallback_x"].setValue(position[0])
+                self.inputs["fallback_y"].setValue(position[1])
             self.raise_()
             self.activateWindow()
         self.pick_locator(apply)
@@ -342,6 +575,17 @@ class StepDialog(QDialog):
             value = self._value(widget)
             if value != "":
                 step[name] = value
+        if self.alternatives is not None and self.alternatives.locators():
+            step["alternatives"] = self.alternatives.locators()
+        if self.action() in LOCATOR_ACTIONS:
+            for key, value, box, flag in (("target", self.target, self.verify_box, "verify"),
+                                          ("screen", self.screen_check, self.screen_box, "check_screen")):
+                if value:
+                    step[key] = value
+                    if not box.isChecked():
+                        step[flag] = False
+            if self.agree.value():
+                step["min_agree"] = self.agree.value()
         for key in ACTIONS[self.action()].blocks:
             step[key] = copy.deepcopy(self.original.get(key, []))
         return step
@@ -356,6 +600,8 @@ class StepDialog(QDialog):
             widget = self.inputs[name]
             widget.setProperty("invalid", "true" if message else "false")
             _repolish(widget)
+        self.alternatives_error.setText(problems.get("alternatives", ""))
+        self.alternatives_error.setVisible("alternatives" in problems)
         self.action_error.setText(problems.get("action", ""))
         self.action_error.setVisible("action" in problems)
         if problems:
@@ -381,9 +627,10 @@ class StepCard(QFrame):
         number.setObjectName("Muted")
         number.setMinimumWidth(28)
         number.setAlignment(Qt.AlignCenter)
-        title = QLabel(ACTION_LABELS.get(step.get("action"), step.get("action", "?")))
+        title = QLabel(str(step.get("title") or "").strip()
+                       or ACTION_LABELS.get(step.get("action"), step.get("action", "?")))
         title.setObjectName("DeviceName")
-        summary = QLabel(describe_step(step))
+        summary = QLabel(describe_step(step, with_title=False))
         summary.setObjectName("Muted")
         summary.setWordWrap(True)
         header_text = QVBoxLayout()
@@ -455,6 +702,11 @@ class BuilderTab(QWidget):
         self.mode_label = QLabel()
         self.mode_label.setObjectName("Muted")
         self.mode_label.setWordWrap(True)
+        self.roles_button = QPushButton("Turn phone roles into step names")
+        self.roles_button.setToolTip("For scripts that used the Phone box to name steps: moves each "
+                                     "step's phone role into its Step name, so the script runs on one phone")
+        self.roles_button.clicked.connect(self.roles_to_step_names)
+        self.roles_button.hide()
 
         self.cards_host = QWidget()
         self.cards_layout = QVBoxLayout(self.cards_host)
@@ -492,6 +744,7 @@ class BuilderTab(QWidget):
         steps_title.setObjectName("PanelTitle")
         steps_header.addWidget(steps_title)
         steps_header.addWidget(self.mode_label, 1)
+        steps_header.addWidget(self.roles_button)
         steps_header.addWidget(pick)
         steps_header.addWidget(add)
         footer = QHBoxLayout()
@@ -558,6 +811,21 @@ class BuilderTab(QWidget):
             self.mode_label.setText(f"Cross-phone workflow · phones {', '.join(roles)}")
         else:
             self.mode_label.setText("Single-phone script · runs on each phone you start it on")
+        self.roles_button.setVisible(bool(roles))
+
+    def roles_to_step_names(self) -> None:
+        roles = self.roles()
+        answer = QMessageBox.question(
+            self, "Use phone roles as step names?",
+            f"Steps are assigned to {len(roles)} phone role(s): {', '.join(roles)}.\n\n"
+            "If you used the Phone box to name steps, this moves each name into Step name and the "
+            "script becomes a normal one-phone script. Only keep roles if one script really drives "
+            "several phones at once.")
+        if answer != QMessageBox.Yes:
+            return
+        changed = roles_to_titles(self.steps)
+        self.render()
+        self.saved_label.setText(f"Renamed {changed} step(s) — click Save Script to keep it")
 
     def render_list(self, layout: QVBoxLayout, steps: list[dict], path: tuple[int, ...], depth: int,
                     add_button: bool = True) -> None:
@@ -612,7 +880,7 @@ class BuilderTab(QWidget):
 
     # ------------------------------------------------------------------ picker
 
-    def _pick_locator(self, apply: Callable[[str, str], None]) -> None:
+    def _pick_locator(self, apply: Callable[[dict], None]) -> None:
         self.dashboard.open_inspector(on_pick=apply)
 
     def open_picker(self) -> None:

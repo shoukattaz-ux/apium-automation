@@ -28,6 +28,7 @@ from core.runner import PythonScript, RunState, load_any_script, needs_role_mapp
 from core.scheduler import Schedule, ScheduleStore
 from core.schema import ScriptError
 from core.version import APP_NAME, APP_VERSION
+from core.wireless import AutoReconnector, WirelessStore, is_wireless
 
 from .history import HistoryPanel
 from .qtutil import safe_emit
@@ -71,7 +72,7 @@ class DeviceRow(QFrame):
         self.dot = QLabel()
         self.name = QLabel(model)
         self.name.setObjectName("DeviceName")
-        self.detail = QLabel(serial)
+        self.detail = QLabel(f"Wi-Fi · {serial}" if is_wireless(serial) else f"USB · {serial}")
         self.detail.setObjectName("Muted")
         self.state_label = QLabel()
         self.state_label.setObjectName("Muted")
@@ -123,7 +124,8 @@ class DeviceRow(QFrame):
     def set_connected(self, connected: bool) -> None:
         self.connected = connected
         if not connected:
-            self.set_state("disconnected", "Plug the phone back in to continue")
+            self.set_state("disconnected", "Reconnecting over Wi-Fi… (Devices → Wireless Devices)"
+                           if is_wireless(self.serial) else "Plug the phone back in to continue")
         else:
             self.set_state(RunState.IDLE, "")
 
@@ -191,6 +193,8 @@ class MainWindow(QMainWindow):
         self._last_scan_error = ""
         self.scans_completed = 0
         self._windows: list[QWidget] = []
+        self.wireless = WirelessStore()
+        self.reconnector = AutoReconnector(self.wireless)
 
         self._build_actions()
         self._build_menus()
@@ -231,6 +235,8 @@ class MainWindow(QMainWindow):
 
         action("refresh", "&Refresh Devices", "⟳  Add New Device", "Re-scan USB for connected phones",
                self.scan_devices, "F5")
+        action("wireless", "&Wireless Devices…", "📶  Wi-Fi", "Connect phones over Wi-Fi instead of USB",
+               self.open_wireless, "Ctrl+Shift+W")
         action("configs", "Open &Configs Folder", "📁  Configs", "Open the folder that holds saved scripts",
                self.open_config_folder)
         action("logs", "Open &Logs Folder", "Logs", "Open the folder with the app's log files", self.open_logs_folder)
@@ -257,7 +263,7 @@ class MainWindow(QMainWindow):
         a = self.actions
         menus = (
             ("&File", ["new", "edit", None, "configs", "logs", None, "settings", None, "quit"]),
-            ("&Devices", ["refresh", None, "run", "start_all", "stop_all"]),
+            ("&Devices", ["refresh", "wireless", None, "run", "start_all", "stop_all"]),
             ("&Tools", ["picker", "schedules"]),
             ("&Help", ["guide", "logs", None, "about"]),
         )
@@ -275,7 +281,7 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addToolBar(toolbar)
-        for key in ("refresh", "configs", None, "new", "edit", "picker", None, "run", "start_all", "stop_all",
+        for key in ("refresh", "wireless", "configs", None, "new", "edit", "picker", None, "run", "start_all", "stop_all",
                     None, "schedules", "settings"):
             if key is None:
                 toolbar.addSeparator()
@@ -303,7 +309,8 @@ class MainWindow(QMainWindow):
         self.rows_layout.setContentsMargins(0, 0, 4, 0)
         self.rows_layout.setSpacing(10)
         self.empty_label = QLabel("No phones found.\n\nConnect a phone with USB debugging enabled,\n"
-                                  "accept the prompt on the phone, then click\n“Add New Device”.")
+                                  "accept the prompt on the phone, then click\n“Add New Device”.\n\n"
+                                  "No cable? Use “Wi-Fi” to connect over Wi-Fi.")
         self.empty_label.setObjectName("EmptyState")
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.rows_layout.addWidget(self.empty_label)
@@ -387,6 +394,8 @@ class MainWindow(QMainWindow):
         def work() -> None:
             try:
                 serials = list_connected_devices()
+                if self.reconnector.run(serials):
+                    serials = list_connected_devices()
                 models = {s: device_model(s) for s in serials if s not in known}
                 safe_emit(self.bridge.devices_scanned, serials, models, "")
             except DeviceError as exc:
@@ -721,7 +730,12 @@ class MainWindow(QMainWindow):
             add_steps = editor.builder.append_steps
         idle = [s for s, _ in self.connected_devices() if not self.manager.is_running(s)]
         serial = self.selected_serial if self.selected_serial in idle else (idle[0] if idle else None)
-        return self._track(InspectorWindow(self, add_steps=add_steps, on_pick=on_pick, roles=roles, serial=serial))
+        window = InspectorWindow(self, add_steps=add_steps, on_pick=on_pick, roles=roles, serial=serial)
+        if on_pick:
+            # Opened from the (modal) Edit Step dialog, which blocks every other window:
+            # the picker must be modal too, on top of it, or it can't be clicked.
+            window.setWindowModality(Qt.ApplicationModal)
+        return self._track(window)
 
     def open_settings(self) -> None:
         from .settings_dialog import SettingsDialog
@@ -729,6 +743,12 @@ class MainWindow(QMainWindow):
         if SettingsDialog(self, self.manager).exec():
             self.statusBar().showMessage("Settings saved", 4000)
             self.check_appium()
+
+    def open_wireless(self) -> None:
+        from .wireless_dialog import WirelessDialog
+
+        WirelessDialog(self, self.wireless, on_change=self.scan_devices).exec()
+        self.scan_devices()
 
     def open_logs_folder(self) -> None:
         paths.logs_dir().mkdir(parents=True, exist_ok=True)

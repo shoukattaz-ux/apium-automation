@@ -72,6 +72,29 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags
 Type: filesandordirs; Name: "{app}\_internal\__pycache__"
 
 [Code]
+{ adb keeps a background server running after the app closes, and the bundled Node (Appium)
+  can outlive it too. Either one locks its files, so an upgrade or uninstall fails with
+  "DeleteFile failed; code 5. Access is denied." Stop only the copies running from this install. }
+procedure StopBundledTools(AppDir: String);
+var
+  ResultCode: Integer;
+  Adb: String;
+begin
+  Adb := AppDir + '\platform-tools\adb.exe';
+  if FileExists(Adb) then
+    Exec(Adb, 'kill-server', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+       '-NoProfile -ExecutionPolicy Bypass -Command "Get-Process adb,node -ErrorAction SilentlyContinue | ' +
+       'Where-Object { $_.Path -like ''' + AppDir + '\*'' } | Stop-Process -Force"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopBundledTools(ExpandConstant('{app}'));
+  Result := '';
+end;
+
 procedure DeleteUserData;
 begin
   DelTree(ExpandConstant('{app}\configs'), True, True, True);
@@ -83,6 +106,8 @@ end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
+  if CurUninstallStep = usUninstall then
+    StopBundledTools(ExpandConstant('{app}'));
   if CurUninstallStep = usPostUninstall then
   begin
     { Silent uninstalls (e.g. during an upgrade by a script) always keep the user's data. }

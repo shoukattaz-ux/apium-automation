@@ -97,8 +97,6 @@ class TargetPicker(QWidget):
         problems = []
         if not chosen:
             problems.append("Choose at least one phone")
-        if self.role_combos and len(set(chosen)) != len(chosen):
-            problems.append("Each role needs a different phone")
         busy = [s for s in chosen if s in self.busy]
         if busy and not allow_busy:
             problems.append(f"Busy: {', '.join(busy)} — stop it first or pick another phone")

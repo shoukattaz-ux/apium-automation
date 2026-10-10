@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import TYPE_CHECKING, Callable
 
@@ -23,9 +24,12 @@ from PySide6.QtWidgets import (
 from core import paths
 from core.devices import DeviceError
 from core.inspector import UiElement, clickable_target, element_at, parse_page_source, suggest_locators
+from core.targeting import fingerprint, layout_size, screen_signature
 
 from .qtutil import safe_emit
 from .theme import ACCENT
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .dashboard import MainWindow
@@ -128,6 +132,8 @@ class InspectorWindow(QWidget):
         self.on_pick = on_pick
         self.elements: list[UiElement] = []
         self.selected: UiElement | None = None
+        self.suggestions: list = []
+        self.png: bytes = b""  # the current screenshot, for cutting out the picked element's picture
         self._busy = False
         self.signals = _Signals(self)  # parented: dropped with the window if a worker finishes late
         self.signals.loaded.connect(self._show_screen)
@@ -198,7 +204,9 @@ class InspectorWindow(QWidget):
 
         actions = QVBoxLayout()
         if on_pick:
-            use = QPushButton("Use this locator")
+            use = QPushButton("Use these locators")
+            use.setToolTip("The highlighted locator becomes the main one; the other unique ones are saved "
+                           "as backups, tried in order if it doesn't match")
             use.setObjectName("Primary")
             use.clicked.connect(self._use_locator)
             actions.addWidget(use)
@@ -274,6 +282,7 @@ class InspectorWindow(QWidget):
         if error:
             self.status.setText(f"✖ {error}")
             return
+        self.png = png
         pixmap = QPixmap()
         pixmap.loadFromData(png, "PNG")
         try:
@@ -312,6 +321,7 @@ class InspectorWindow(QWidget):
     def _show_details(self, element: UiElement | None) -> None:
         self.table.setRowCount(0)
         self.locators.clear()
+        self.suggestions = []
         if element is None:
             self.title.setText("Nothing selected")
             return
@@ -323,8 +333,11 @@ class InspectorWindow(QWidget):
                 self.table.insertRow(row)
                 self.table.setItem(row, 0, QTableWidgetItem(name))
                 self.table.setItem(row, 1, QTableWidgetItem(value))
-        for suggestion in suggest_locators(element, self.elements):
+        self.suggestions = suggest_locators(element, self.elements)
+        for suggestion in self.suggestions:
             badge = "✓ unique" if suggestion.unique else f"matches {suggestion.matches}"
+            if suggestion.fragile:
+                badge += " · fragile: breaks if the screen scrolls or changes"
             item = QListWidgetItem(f"{suggestion.locator_type}  =  {suggestion.locator_value}     [{badge}]")
             item.setData(Qt.UserRole, (suggestion.locator_type, suggestion.locator_value))
             self.locators.addItem(item)
@@ -332,15 +345,56 @@ class InspectorWindow(QWidget):
 
     def current_locator(self) -> tuple[str, str] | None:
         item = self.locators.currentItem()
-        return item.data(Qt.UserRole) if item else None
+        return tuple(item.data(Qt.UserRole)) if item else None
 
     # ------------------------------------------------------------------ actions
 
     def _role(self) -> str:
         return self.role_combo.currentText().strip()
 
-    def _step_for(self, action: str, locator: tuple[str, str]) -> dict:
+    def ranked_locators(self) -> list[tuple[str, str]]:
+        """Every unique locator, stable before fragile, the highlighted one first within its group.
+
+        A fragile (positional) locator is never made the main one while a stable one exists,
+        even if it was highlighted: it would fail as soon as the screen scrolls or changes.
+        """
+        chosen = self.current_locator()
+        unique = [s for s in self.suggestions if s.unique]
+        if not unique and chosen:
+            return [chosen]
+        unique.sort(key=lambda s: (s.fragile, (s.locator_type, s.locator_value) != chosen))
+        ranked = [(s.locator_type, s.locator_value) for s in unique if not s.fragile]
+        picture = self._picture()
+        if picture:  # after the stable locators, before the positional ones
+            ranked.append(("image", picture))
+        return ranked + [(s.locator_type, s.locator_value) for s in unique if s.fragile]
+
+    def _picture(self) -> str:
+        """Save the selected element's picture under configs/images; its path, or '' if not useful."""
+        from core import imagematch
+
+        if self.selected is None or not self.png or not self.elements:
+            return ""
+        layout = layout_size(self.elements)
+        if not imagematch.worth_keeping(self.selected.bounds, layout):
+            return ""
+        try:
+            crop = imagematch.crop_png(self.png, self.selected.bounds, layout)
+            return imagematch.save_template(crop, paths.configs_dir() / "images")
+        except (OSError, ValueError) as exc:
+            log.warning("Could not save the element's picture: %s", exc)
+            return ""
+
+    def _step_for(self, action: str) -> dict:
+        """A step for the selected element: best locator as the main one, the rest as backups."""
+        ranked = self.ranked_locators()
+        locator, backups = ranked[0], ranked[1:]
         step: dict = {"action": action, "locator_type": locator[0], "locator_value": locator[1]}
+        if backups:
+            step["alternatives"] = [{"locator_type": t, "locator_value": v} for t, v in backups]
+        if action == "click":
+            step.update(self._fallback_position())
+        step.update(self._safety_checks())
         if action == "copy_text":
             step["save_as"] = "copied_value"
         elif action == "paste_text":
@@ -357,17 +411,39 @@ class InspectorWindow(QWidget):
                 child["device"] = self._role()
         return step
 
+    def _safety_checks(self) -> dict:
+        """Fingerprint of the selected element and the screen it's on, checked before acting at run time."""
+        if self.selected is None or not self.elements:
+            return {}
+        return {"target": fingerprint(self.selected, self.elements),
+                "screen": screen_signature(self.selected, self.elements)}
+
+    def _fallback_position(self) -> dict:
+        """The selected element's centre as percent of the screen, as a Click step's backup tap."""
+        if self.selected is None or not self.elements:
+            return {}
+        # Measure against the layout's own extent (what element bounds are in), not the screenshot's pixels.
+        width = max(e.bounds[2] for e in self.elements)
+        height = max(e.bounds[3] for e in self.elements)
+        if width <= 0 or height <= 0:
+            return {}
+        left, top, right, bottom = self.selected.bounds
+        return {"fallback_x": round(min(100.0, max(0.0, (left + right) / 2 / width * 100)), 1),
+                "fallback_y": round(min(100.0, max(0.0, (top + bottom) / 2 / height * 100)), 1)}
+
     def _add_step(self, action: str) -> None:
-        locator = self.current_locator()
-        if not locator or not self.add_steps:
+        if not self.current_locator() or not self.add_steps:
             return
-        self.add_steps([self._step_for(action, locator)])
+        self.add_steps([self._step_for(action)])
         self.status.setText(f"Added {action.replace('_', ' ')} step")
 
     def _use_locator(self) -> None:
-        locator = self.current_locator()
-        if locator and self.on_pick:
-            self.on_pick(*locator)
+        locators = self.ranked_locators()
+        if locators and self.on_pick:
+            position = self._fallback_position()
+            self.on_pick({"locators": locators,
+                          "position": (position["fallback_x"], position["fallback_y"]) if position else None,
+                          **self._safety_checks()})
             self.close()
 
     def _copy_locator(self) -> None:
@@ -383,7 +459,7 @@ class InspectorWindow(QWidget):
         locator = self.current_locator()
         if not locator:
             return
-        self.add_steps([self._step_for("click", locator)])
+        self.add_steps([self._step_for("click")])
         serial = self.serial()
         manager = self.dashboard.manager
         self.status.setText("Clicking on the phone…")

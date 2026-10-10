@@ -17,13 +17,19 @@ others.
   **Repeat** and **If element exists / Otherwise** blocks with nested steps,
   per-step **retries** and **stop-on-failure**, and `{{variable}}` placeholders
   in any text.
+- **Wi-Fi phones** (Ctrl+Shift+W) — switch a USB phone to Wi-Fi with one click
+  (`adb tcpip`), pair Android 11+ phones with a pairing code, or connect by IP.
+  Connected phones are remembered and reconnected automatically; a phone on
+  both USB and Wi-Fi is listed once.
 - **Cross-phone workflows** — give steps a phone role (`A`, `B`, …): one script
   copies on phone A and pastes on phone B, sharing variables. At run time you
   choose which real phone plays each role.
 - **Element Picker & Recorder** — a live screenshot of the phone: hover and
   click an element to see its attributes and the best locator (unique ones
   first), add it as a step, or turn on **Record clicks** to build a script by
-  using the app.
+  using the app. Unlabelled buttons are found through a labelled child
+  (`//*[@content-desc="Video"]/..`), positional paths are flagged as fragile,
+  and recorded clicks keep a backup tap position.
 - **Repeat runs** — run N times or until stopped, with a pause between runs.
 - **Schedules** — run scripts daily at set times on chosen weekdays, or every N
   minutes. Busy or unplugged phones are skipped and logged.
@@ -55,8 +61,11 @@ others.
 | `core/runner.py` | `ScriptRunner` (blocks, retries, on-fail, roles, variables, reports), `run_repeatedly`, `run_script_on_devices`. |
 | `core/manager.py` | Session and run management: one run per phone, workflows reserve all their phones, repeats, finish hooks. |
 | `core/history.py` | Run recorder, JSON/HTML reports, failure screenshots, CSV export. |
+| `core/localfind.py`, `core/imagematch.py` | One layout snapshot per look for all locators; picture search and comparison. |
+| `core/targeting.py` | Safety checks: element fingerprint, screen signature, rejecting wrong or ambiguous matches. |
 | `core/inspector.py` | Parses the screen hierarchy, finds the element under a point, ranks locators. |
 | `core/scheduler.py` | Daily / interval schedules stored in `configs/schedules.json`. |
+| `core/wireless.py`, `ui/wireless_dialog.py` | Wi-Fi connections: switch to Wi-Fi, pair, connect, saved phones and auto-reconnect. |
 | `core/appium_server.py` | Detects Appium and starts a bundled or installed copy if needed. |
 | `core/logging_setup.py`, `core/settings.py`, `core/version.py` | Rotating log + exception hooks, user settings, app version. |
 | `ui/dashboard.py` | Main window. |
@@ -115,7 +124,8 @@ The Appium URL defaults to `http://127.0.0.1:4723`; override it with
 | Action | Fields |
 | --- | --- |
 | `open_app`, `close_app` | `package` |
-| `click`, `wait_for_element` | locator, `timeout_seconds` |
+| `click` | locator, `timeout_seconds`, optional `fallback_x`/`fallback_y` (percent): tapped if the element isn't found |
+| `wait_for_element` | locator, `timeout_seconds` |
 | `copy_text` | locator, `save_as` |
 | `paste_text` | locator, `value_from` (variable) or `text` (with `{{placeholders}}`) |
 | `scroll` | `direction` (up/down/left/right), `times` |
@@ -130,8 +140,38 @@ The Appium URL defaults to `http://127.0.0.1:4723`; override it with
 | `if_exists` | locator, `timeout_seconds`, `then`, `else` |
 | `stop_run` | `message` |
 
+Steps that find an element (`click`, `wait_for_element`, `copy_text`,
+`paste_text`, `if_exists`) also accept `alternatives`: backup locators, e.g.
+`[{"locator_type": "xpath", "locator_value": "//*[@content-desc=\"Video\"]/.."}]`.
+All of them are checked about twice a second until the timeout and the first
+one in the list that matches is used. "Pick from screen…" fills them in.
+
+When an element is picked, the step also records **safety checks**: a
+fingerprint of the element (`target`: class, id, text, description, size,
+position) and the screen it was on (`screen`: app package plus landmarks such
+as tab or title bars). At run time a locator's match only counts if it fits
+the fingerprint (otherwise the next locator is tried; look-alikes that can't be
+told apart are skipped rather than guessed), the step waits for the recorded
+screen, and an element is only tapped once it is on screen and has stopped
+moving. The backup tap position is only used if the picked element is still
+under it. Either check can be turned off per step (`"verify": false`,
+`"check_screen": false`). Logic: `core/targeting.py`.
+
+**Votes.** Each look at the screen reads the layout once (`core/localfind.py`)
+and every locator votes for the element it matched (if it fits the
+fingerprint). The element with the most votes is used when it has at least
+`min_agree` votes (default: 2 for steps with three or more locators, else 1)
+and no other element ties with it; outvoted locators are named in the log.
+
+**Pictures.** The picker also saves the element's image in `configs/images`
+and adds it as an `image` locator. The picture votes for the found element
+that still looks like it, and if no locator settles on the element, a Click
+taps the picture's position when it is found exactly once with a strong match
+(`core/imagematch.py`, numpy + Pillow). Pictures suit icons, tabs and buttons;
+they don't carry over to other phone models or themes.
+
 Locator types: `id`, `xpath`, `accessibility id`, `text` (exact visible text),
-`class name`, `android uiautomator`. All device steps also accept `device`
+`class name`, `android uiautomator`, `image` (a PNG under `configs/`). All device steps also accept `device`
 (phone role), `retries` and `on_fail` (`skip` or `stop`). Built-in variables:
 `{{run_number}}`, `{{loop_index}}`, `{{device}}`, `{{date}}`, `{{time}}`.
 

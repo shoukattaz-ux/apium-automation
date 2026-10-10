@@ -43,7 +43,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-LOCATOR_TYPES = ["id", "xpath", "accessibility id", "text", "class name", "android uiautomator"]
+LOCATOR_TYPES = ["id", "xpath", "accessibility id", "text", "class name", "android uiautomator", "image"]
+MAX_AGREE = 10
 DIRECTIONS = ["up", "down", "left", "right"]
 KEYS = ["back", "home", "enter", "recent_apps", "delete", "search", "menu", "volume_up", "volume_down"]
 ON_FAIL = ["skip", "stop"]
@@ -106,8 +107,13 @@ ACTIONS: dict[str, ActionSpec] = {
             FieldSpec("package", "App package ID", "text", templated=True),
         ), group="Apps", description="Force-stop an app"),
         # ---- elements
-        ActionSpec("click", "Click", _locator() + (_timeout(),), group="Elements",
-                   description="Tap a button, field or item"),
+        ActionSpec("click", "Click", _locator() + (
+            _timeout(),
+            FieldSpec("fallback_x", "If not found, tap at X %", "float", required=False, minimum=0, maximum=100,
+                      help="Backup position (percent of screen) tapped when the element isn't found. "
+                           "Filled in by the Element Picker; clear both to turn off."),
+            FieldSpec("fallback_y", "If not found, tap at Y %", "float", required=False, minimum=0, maximum=100),
+        ), group="Elements", description="Tap a button, field or item"),
         ActionSpec("wait_for_element", "Wait For Element", _locator() + (_timeout(required=True),),
                    group="Elements", description="Wait until something appears on screen"),
         ActionSpec("copy_text", "Copy Text", _locator() + (
@@ -171,13 +177,22 @@ ACTION_LABELS = {key: spec.label for key, spec in ACTIONS.items()}
 BLOCK_LABELS = {"steps": "Do", "then": "Then", "else": "Otherwise"}
 
 # Options every device step accepts (shown under "Advanced" in the builder).
-DEVICE_FIELD = FieldSpec("device", "Phone", "text", required=False,
-                         help="Empty = the default phone. Use A, B… to drive several phones")
+TITLE_FIELD = FieldSpec("title", "Step name", "text", required=False,
+                        help="Your name for this step, shown in the step list and the log, e.g. Open Video tab")
+DEVICE_FIELD = FieldSpec("device", "Phone role", "text", required=False,
+                         help="Leave empty for normal scripts. Only for one script that drives several "
+                              "phones at once (A, B…). To name the step, use Step name.")
 RETRIES_FIELD = FieldSpec("retries", "Retries", "int", required=False, default=0, minimum=0, maximum=20,
                           help="Extra attempts before the step counts as failed")
 ON_FAIL_FIELD = FieldSpec("on_fail", "If it fails", "choice", required=False, default="skip",
                           choices=tuple(ON_FAIL), help="skip = log and carry on, stop = end the run")
 COMMON_FIELDS = (DEVICE_FIELD, RETRIES_FIELD, ON_FAIL_FIELD)
+
+# Actions that find an element; they also accept ``alternatives``: backup locators
+# ([{"locator_type": ..., "locator_value": ...}, ...]) tried when the main one doesn't match.
+LOCATOR_ACTIONS = frozenset(key for key, spec in ACTIONS.items()
+                            if any(f.name == "locator_type" for f in spec.fields))
+_LOOKS_LIKE_XPATH = re.compile(r"^\(?\s*/")
 
 _VARIABLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
@@ -194,8 +209,8 @@ def fields_for(action: str) -> tuple[FieldSpec, ...]:
     """Action fields plus the common options that apply to it."""
     spec = ACTIONS[action]
     if not spec.uses_device:
-        return spec.fields
-    return spec.fields + COMMON_FIELDS
+        return (TITLE_FIELD,) + spec.fields
+    return (TITLE_FIELD,) + spec.fields + COMMON_FIELDS
 
 
 def render(text: Any, variables: dict[str, Any]) -> str:
@@ -234,6 +249,22 @@ def script_roles(script: dict) -> list[str]:
         if role and role not in roles:
             roles.append(role)
     return roles
+
+
+def roles_to_titles(steps: list[dict]) -> int:
+    """Turn each step's phone role into its step name (for scripts that used roles as labels).
+
+    Returns how many steps changed. An existing step name is kept and the role appended.
+    """
+    changed = 0
+    for _, step in iter_steps(steps):
+        role = str(step.pop("device", "") or "").strip()
+        if not role:
+            continue
+        title = str(step.get("title") or "").strip()
+        step["title"] = f"{title} ({role})" if title and role not in title else (title or role)
+        changed += 1
+    return changed
 
 
 def is_workflow(script: dict) -> bool:
@@ -294,7 +325,47 @@ def validate_step(step: dict) -> dict[str, str]:
 
     if action == "paste_text" and not step.get("value_from") and not step.get("text"):
         errors["value_from"] = "Choose a variable to paste, or enter text to type"
+    if action in LOCATOR_ACTIONS:
+        hint = _locator_problem(step.get("locator_type"), step.get("locator_value"))
+        if hint and "locator_value" not in errors:
+            errors["locator_value"] = hint
+        alternatives = step.get("alternatives") or []
+        if not isinstance(alternatives, list):
+            errors["alternatives"] = "Backup locators must be a list"
+        else:
+            for number, alt in enumerate(alternatives, 2):
+                if not isinstance(alt, dict) or alt.get("locator_type") not in LOCATOR_TYPES \
+                        or not str(alt.get("locator_value", "")).strip():
+                    errors["alternatives"] = f"Backup locator {number} needs a type and a value"
+                    break
+                hint = _locator_problem(alt["locator_type"], alt["locator_value"])
+                if hint:
+                    errors["alternatives"] = f"Backup locator {number}: {hint}"
+                    break
+    if action in LOCATOR_ACTIONS:
+        for key in ("target", "screen"):
+            if key in step and not isinstance(step[key], dict):
+                errors[key] = f"{key} must be an object"
+        agree = step.get("min_agree")
+        if agree not in (None, "") and (isinstance(agree, bool) or not str(agree).isdigit()
+                                        or not 0 <= int(agree) <= MAX_AGREE):
+            errors["min_agree"] = f"Locators that must agree: a whole number from 1 to {MAX_AGREE}"
+    if action == "click" and (step.get("fallback_x") is None) != (step.get("fallback_y") is None):
+        errors["fallback_y" if step.get("fallback_y") is None else "fallback_x"] = \
+            "Set both X and Y for the backup tap, or neither"
     return errors
+
+
+def _locator_problem(locator_type: Any, locator_value: Any) -> str:
+    """Catch the common mix-up of an XPath saved under another locator type, and bad image paths."""
+    if locator_type == "image":
+        value = str(locator_value or "").replace("\\", "/")
+        if not value.lower().endswith(".png") or value.startswith("/") or ".." in value.split("/") or ":" in value:
+            return "An image locator is a PNG inside the configs folder, e.g. images/abc.png"
+        return ""
+    if locator_type != "xpath" and isinstance(locator_value, str) and _LOOKS_LIKE_XPATH.match(locator_value):
+        return "This value is an XPath — set “Find element by” to xpath"
+    return ""
 
 
 def validate_steps(steps: Any, path: tuple[int, ...] = (), depth: int = 0) -> list[str]:
@@ -358,6 +429,22 @@ def normalize_step(step: dict) -> dict:
         if spec in COMMON_FIELDS and value == spec.default:
             continue  # keep saved files short: retries 0 / on_fail skip are implied
         clean[spec.name] = value
+    if action in LOCATOR_ACTIONS and isinstance(step.get("alternatives"), list):
+        alternatives = [{"locator_type": a["locator_type"], "locator_value": str(a["locator_value"]).strip()}
+                        for a in step["alternatives"]
+                        if isinstance(a, dict) and a.get("locator_type") and str(a.get("locator_value", "")).strip()]
+        if alternatives:
+            clean["alternatives"] = alternatives
+    if action in LOCATOR_ACTIONS:
+        # Safety checks recorded by the element picker (see core/targeting.py).
+        for key in ("target", "screen"):
+            if isinstance(step.get(key), dict) and step[key]:
+                clean[key] = step[key]
+        for key in ("verify", "check_screen"):
+            if step.get(key) is False:
+                clean[key] = False
+        if str(step.get("min_agree") or "0").isdigit() and int(step.get("min_agree") or 0) > 0:
+            clean["min_agree"] = int(step["min_agree"])
     for key in ACTIONS[action].blocks:
         children = step.get(key) or []
         if children or key != "else":
@@ -365,8 +452,13 @@ def normalize_step(step: dict) -> dict:
     return clean
 
 
-def describe_step(step: dict) -> str:
-    """One-line human summary of a step, used on builder cards and in logs."""
+def describe_step(step: dict, with_title: bool = True) -> str:
+    """One-line human summary of a step, used on builder cards and in logs.
+
+    With ``with_title`` the user's step name leads, e.g. ``Open Video tab — Click text=Video``.
+    """
+    if with_title and str(step.get("title") or "").strip():
+        return f"{str(step['title']).strip()} — {describe_step(step, with_title=False)}"
     action = step.get("action")
     label = ACTION_LABELS.get(action, str(action))
     target = f"{step.get('locator_type')}={step.get('locator_value')}"
@@ -407,6 +499,15 @@ def describe_step(step: dict) -> str:
     else:
         text = f"{label} {target}"
     extras = []
+    checks = [name for key, flag, name in (("target", "verify", "element"), ("screen", "check_screen", "screen"))
+              if step.get(key) and step.get(flag, True)]
+    if checks:
+        extras.append(f"checks {' + '.join(checks)}")
+    if step.get("min_agree"):
+        extras.append(f"{step['min_agree']} must agree")
+    if step.get("alternatives"):
+        count = len(step["alternatives"])
+        extras.append(f"+{count} backup locator{'s' if count > 1 else ''}")
     if step.get("retries"):
         extras.append(f"{step['retries']} retries")
     if step.get("on_fail") == "stop":

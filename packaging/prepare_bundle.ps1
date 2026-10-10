@@ -37,6 +37,9 @@ $env:APPIUM_HOME = Join-Path $Server "appium-home"
 Write-Host "Installing UiAutomator2 driver..."
 & $Node (Join-Path $Server "node_modules\appium\index.js") driver install uiautomator2
 if ($LASTEXITCODE -ne 0) { throw "Appium driver install failed" }
+# Appium's driver list stores this build machine's absolute paths; drop it so Appium
+# rebuilds it with the right paths on the user's PC (the app also repairs it at start).
+Remove-Item (Join-Path $env:APPIUM_HOME "node_modules\.cache\appium\extensions.yaml") -ErrorAction SilentlyContinue
 
 # 4. Android platform-tools (adb)
 $ToolsZip = Join-Path $Temp "platform-tools.zip"

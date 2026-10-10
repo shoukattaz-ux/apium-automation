@@ -22,15 +22,57 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from .devices import DeviceError, DeviceSession, RunStopped
+from .devices import DeviceError, DeviceSession, ElementNotFound, RunStopped
 from .history import RunRecorder, StepRecord
+from .inspector import element_at, parse_page_source
+from . import paths
 from .settings import default_timeout
+from .targeting import Candidate, anchor_xpath, check, choose, layout_size, visible_and_settled
 from .schema import (
-    ACTIONS, ScriptError, describe_step, format_path, load_script, render,
+    ACTIONS, LOCATOR_ACTIONS, ScriptError, describe_step, format_path, load_script, render,
     script_roles,
 )
 
 log = logging.getLogger(__name__)
+
+SETTLE_SECONDS = 0.3      # pause between the two looks that confirm an element isn't moving
+SETTLE_GRACE_LOOKS = 3    # extra looks allowed past the timeout to finish that check
+
+
+@dataclass
+class _Group:
+    """One element on screen and the locators that point at it."""
+
+    candidate: Any
+    voters: list[str]
+
+
+def _same_place(a: tuple[int, int, int, int] | None, b: tuple[int, int, int, int] | None) -> bool:
+    return a is not None and b is not None and all(abs(x - y) <= 4 for x, y in zip(a, b))
+
+
+def _vote(groups: list[_Group], candidate: Any, name: str) -> None:
+    for group in groups:
+        if group.candidate is candidate or _same_place(group.candidate.bounds, candidate.bounds):
+            group.voters.append(name)
+            return
+    groups.append(_Group(candidate, [name]))
+
+
+def _decide(groups: list[_Group], quorum: int, usable: int) -> tuple[_Group | None, str]:
+    """The element with the most votes, if it has enough and nothing ties with it."""
+    if not groups:
+        return None, "no locator matched"
+    ranked = sorted(groups, key=lambda g: len(g.voters), reverse=True)
+    top = ranked[0]
+    votes = len(top.voters)
+    if len(ranked) > 1 and len(ranked[1].voters) == votes:
+        return None, (f"locators disagree: {votes} point at {top.candidate.label()}, {votes} at "
+                      f"{ranked[1].candidate.label()} — not guessing")
+    if votes < quorum:
+        return None, (f"only {votes} of {usable} locators agree ({', '.join(top.voters)}); "
+                      f"this step needs {quorum}")
+    return top, ""
 
 LogCallback = Callable[[str, str], None]  # (serial, message)
 
@@ -174,6 +216,7 @@ class ScriptRunner:
         self.on_log = on_log
         self.status = status or StatusBoard()
         self.stop_event = stop_event or threading.Event()
+        self._templates: dict[str, Any] = {}  # picked elements' images, loaded once per run
         self.variables: dict[str, Any] = variables if variables is not None else {}
         self.recorder = recorder
         self.run_number = run_number
@@ -389,6 +432,8 @@ class ScriptRunner:
         timeout = float(step.get("timeout_seconds", default_timeout()))
         locator = (step.get("locator_type"), value("locator_value"))
 
+        if action in LOCATOR_ACTIONS:
+            return self._element_step(step, session, locator, timeout, value)
         if action == "wait":
             self._sleep(float(step["seconds"]))
         elif action == "set_variable":
@@ -400,23 +445,6 @@ class ScriptRunner:
             session.open_app(value("package"))
         elif action == "close_app":
             session.close_app(value("package"))
-        elif action == "click":
-            session.click(*locator, timeout_seconds=timeout)
-        elif action == "wait_for_element":
-            session.wait_for_element(*locator, timeout_seconds=timeout)
-        elif action == "copy_text":
-            text = session.copy_text(*locator, timeout_seconds=timeout)
-            self.variables[step["save_as"]] = text
-            self.log(f"    copied {text!r} → {step['save_as']}", session)
-        elif action == "paste_text":
-            if step.get("value_from"):
-                key = step["value_from"]
-                if key not in self.variables:
-                    raise DeviceError(f"Nothing was copied into '{key}' yet")
-                text = str(self.variables[key])
-            else:
-                text = value("text", "")
-            session.paste_text(*locator, text, timeout_seconds=timeout)
         elif action == "scroll":
             session.scroll(step.get("direction", "down"), int(step.get("times", 1)))
         elif action == "scroll_to_text":
@@ -431,11 +459,302 @@ class ScriptRunner:
         elif action == "screenshot":
             png = session.screenshot_png()
             return self.recorder.save_screenshot(png, value("name", "screenshot")) if self.recorder else ""
-        elif action == "if_exists":
-            return session.exists(*locator, timeout_seconds=float(step.get("timeout_seconds", 3)))
         else:
             raise DeviceError(f"Unknown action {action!r}")
         return None
+
+    # ------------------------------------------------------------ finding elements
+
+    def _element_step(self, step: dict, session: DeviceSession, locator: tuple[str, str], timeout: float,
+                      value: Callable[..., Any]) -> Any:
+        """Steps that act on an element: find the *right* one (see core.targeting), then act on it."""
+        action = step["action"]
+        if action == "if_exists":
+            try:
+                self._find(step, session, locator, float(step.get("timeout_seconds", 3)), quiet=True)
+                return True
+            except ElementNotFound:
+                return False
+        text = ""
+        if action == "paste_text":
+            if step.get("value_from"):
+                key = step["value_from"]
+                if key not in self.variables:
+                    raise DeviceError(f"Nothing was copied into '{key}' yet")
+                text = str(self.variables[key])
+            else:
+                text = value("text", "")
+        try:
+            found = self._find(step, session, locator, timeout)
+        except ElementNotFound:
+            if action == "click" and self._tap_fallback(step, session):
+                return None
+            raise
+        if action == "click":
+            session.click_candidate(found)
+        elif action == "copy_text":
+            copied = session.text_of(found)
+            self.variables[step["save_as"]] = copied
+            self.log(f"    copied {copied!r} → {step['save_as']}", session)
+        elif action == "paste_text":
+            session.type_into(found, text)
+        return None
+
+    def _locators(self, step: dict, main: tuple[str, str]) -> list[tuple[str, str]]:
+        return [main] + [(alt["locator_type"], render(str(alt["locator_value"]), self.variables))
+                         for alt in step.get("alternatives", [])]
+
+    @staticmethod
+    def _checks(step: dict) -> tuple[dict | None, dict | None]:
+        """The step's fingerprint and screen signature, unless turned off on the step."""
+        target = step.get("target") if step.get("verify", True) else None
+        screen = step.get("screen") if step.get("check_screen", True) else None
+        return target or None, screen or None
+
+    @staticmethod
+    def _quorum(step: dict, locators: list[tuple[str, str]], target: dict | None) -> int:
+        """How many locators must point at the same element before the step acts on it.
+
+        The step's own setting (``min_agree``) if it has one; otherwise 2 for picked steps
+        with three or more locators (one broken locator then can't decide alone), else 1.
+        """
+        asked = int(step.get("min_agree") or 0)
+        if asked:
+            return max(1, min(asked, len(locators)))
+        if not target:
+            return 1
+        return 2 if len(locators) >= 3 else 1
+
+    @staticmethod
+    def _locator_name(index: int, locator: tuple[str, str]) -> str:
+        if index == 0:
+            return "main locator"
+        return "picture" if locator[0] == "image" else f"backup {index + 1}"
+
+    def _find(self, step: dict, session: DeviceSession, main: tuple[str, str], timeout: float,
+              quiet: bool = False) -> Candidate:
+        """Find the element the step is about, checking all its locators until ``timeout``.
+
+        Each look reads the screen once, then every locator votes for the element it
+        matched, if that element fits the picked element's fingerprint; the picture
+        votes for the element it looks like. The element with the most votes is used
+        when it has at least the step's quorum and no other element ties with it.
+        Before acting, the phone must show the picked screen and the element must be
+        in the same place on two looks in a row (not scrolling or animating).
+        Steps recorded before fingerprints existed keep the old rule: first match wins.
+        """
+        locators = self._locators(step, main)
+        target, screen = self._checks(step)
+        quorum = self._quorum(step, locators, target)
+        deadline = time.monotonic() + max(0.0, timeout)
+        size: tuple[int, int] | None = None
+        invalid: set[int] = set()
+        noted: set[str] = set()
+        reason = "no locator matched"
+        settling: tuple[int, int, int, int] | None = None
+        grace = SETTLE_GRACE_LOOKS
+
+        def note(message: str) -> None:
+            if not quiet and message not in noted:
+                noted.add(message)
+                self.log(f"    {message}", session)
+
+        while True:
+            if self.stop_event.is_set():
+                raise RunStopped()
+            on_screen, why = self._screen_matches(session, screen) if screen else (True, "")
+            winner = None
+            if not on_screen:
+                reason, settling = why, None
+            else:
+                session.begin_pass()
+                if size is None:
+                    size = session.window_size()
+                groups: list[_Group] = []
+                pictures: list[tuple[int, str, str]] = []
+                for index, (locator_type, locator_value) in enumerate(locators):
+                    if index in invalid:
+                        continue
+                    name = self._locator_name(index, (locator_type, locator_value))
+                    if locator_type == "image":
+                        pictures.append((index, name, locator_value))
+                        continue
+                    try:
+                        matches = session.candidates(locator_type, locator_value)
+                    except ElementNotFound:
+                        matches = []
+                    except Exception as exc:
+                        if not _invalid_locator(exc):
+                            raise  # e.g. the session was lost: handled by the step's caller
+                        invalid.add(index)
+                        note(f"✗ {name} is not a valid locator ({locator_type}={locator_value}) — skipped")
+                        continue
+                    chosen, why = choose(target, matches, size)
+                    if chosen is None:
+                        if matches:
+                            note(f"✗ {name} {why} — skipped")
+                        continue
+                    if why:
+                        note(f"⚠ {name} {why}")
+                    if not target:  # older steps: the first match wins, as before
+                        groups = [_Group(chosen, [name])]
+                        break
+                    _vote(groups, chosen, name)
+                for index, name, path in pictures:
+                    if groups:
+                        self._picture_vote(session, groups, index, name, path, size, note, invalid)
+                winner, why = _decide(groups, quorum, len(locators) - len(invalid))
+                if winner is None:
+                    reason, settling = why, None
+                    if groups:
+                        note(f"✗ {why}")
+                else:
+                    for loser in groups:
+                        if loser is not winner:
+                            note(f"⚠ {', '.join(loser.voters)} pointed at a different element "
+                                 f"({loser.candidate.label()}) — outvoted {len(winner.voters)} to "
+                                 f"{len(loser.voters)}")
+                    bounds = winner.candidate.bounds
+                    if bounds and settling is None:
+                        settling, reason = bounds, "waiting for it to hold still"
+                        winner = None  # take one more look to be sure it isn't moving
+                    else:
+                        settled, why = visible_and_settled(settling, bounds, size)
+                        if settled:
+                            self._log_choice(winner, locators, invalid, target, session)
+                            return winner.candidate
+                        settling, reason, winner = bounds, why, None
+            expired = time.monotonic() >= deadline
+            if expired and (settling is None or grace <= 0):
+                raise ElementNotFound(f"Element not found within {timeout:g}s: {reason}")
+            if expired:
+                grace -= 1  # finishing the hold-still check doesn't count against the timeout
+            self._sleep(SETTLE_SECONDS if settling else 0.5)
+
+    def _log_choice(self, winner: "_Group", locators: list, invalid: set[int], target: dict | None,
+                    session: DeviceSession) -> None:
+        voters = winner.voters
+        if target and len(locators) > 1:
+            self.log(f"    ✓ {len(voters)} of {len(locators) - len(invalid)} locators agree: {', '.join(voters)}",
+                     session)
+        elif voters[0] != "main locator":
+            index = next(i for i in range(len(locators)) if self._locator_name(i, locators[i]) == voters[0])
+            self.log(f"    ↪ found with {voters[0]}: {locators[index][0]}={locators[index][1]}", session)
+
+    def _template(self, path: str):
+        """A picked element's image, loaded once per run (None if the file is missing)."""
+        if path not in self._templates:
+            from . import imagematch
+
+            file = paths.configs_dir() / path
+            self._templates[path] = imagematch.load_gray(file) if file.is_file() else None
+        return self._templates[path]
+
+    def _screenshot_gray(self, session: DeviceSession):
+        from . import imagematch
+
+        return imagematch.load_gray(session.screenshot_for_pass())
+
+    def _picture_vote(self, session: DeviceSession, groups: list["_Group"], index: int, name: str, path: str,
+                      size: tuple[int, int] | None, note: Callable[[str], None], invalid: set[int]) -> None:
+        """The picture votes for the found element that still looks like the picked one."""
+        from . import imagematch
+
+        template = self._template(path)
+        if template is None:
+            invalid.add(index)
+            note(f"✗ {name}: image file {path} is missing — skipped")
+            return
+        shot = self._screenshot_gray(session)
+        scale = shot.shape[1] / size[0] if size and size[0] else 1.0
+        best, best_group = -1.0, None
+        for group in groups:
+            bounds = group.candidate.bounds
+            if not bounds:
+                continue
+            score = imagematch.similarity(shot, template, tuple(int(round(v * scale)) for v in bounds))
+            if score > best:
+                best, best_group = score, group
+        best = max(best, 0.0)
+        if best_group is not None and best >= imagematch.CHECK_THRESHOLD:
+            best_group.voters.append(name)
+        elif best_group is not None:
+            note(f"✗ {name} doesn't look like what the locators found ({best:.0%} similar)")
+
+    @staticmethod
+    def _screen_matches(session: DeviceSession, screen: dict) -> tuple[bool, str]:
+        package = screen.get("package")
+        if package:
+            current = session.current_package()
+            if current != package:
+                return False, f"wrong app on screen ({current or 'none'}, expected {package})"
+        anchors = screen.get("anchors") or []
+        if anchors and not any(session.exists(*anchor_xpath(anchor), timeout_seconds=0) for anchor in anchors):
+            return False, f"not on the picked screen (none of {', '.join(repr(a[1]) for a in anchors)} showing)"
+        return True, ""
+
+    def _tap_fallback(self, step: dict, session: DeviceSession) -> bool:
+        """Last resorts for a Click when no locator settled on the element, used only where safe.
+
+        1. The picture: tapped if it is found once on screen with a strong match.
+        2. The saved position: tapped only if the picked element is still under it.
+        Either way the phone must be on the picked screen (when recorded).
+        """
+        target, screen = self._checks(step)
+        pictures = [alt["locator_value"] for alt in [{"locator_type": step.get("locator_type"),
+                                                       "locator_value": step.get("locator_value")}]
+                    + list(step.get("alternatives", [])) if alt.get("locator_type") == "image"]
+        x, y = step.get("fallback_x"), step.get("fallback_y")
+        if not pictures and (x is None or y is None):
+            return False
+        if screen:
+            on_screen, why = self._screen_matches(session, screen)
+            if not on_screen:
+                self.log(f"    ✗ backup tap not used: {why}", session)
+                return False
+        if pictures and self._tap_picture(session, pictures):
+            return True
+        if x is None or y is None:
+            return False
+        if target:
+            elements = parse_page_source(session.page_source())
+            width, height = layout_size(elements)
+            point = (float(x) / 100 * width, float(y) / 100 * height)
+            under = [e for e in elements if e.contains(*point)]
+            if not any(check(target, {"class": e.class_name, "resource-id": e.resource_id, "text": e.text,
+                                      "content-desc": e.content_desc, "bounds": list(e.bounds)}, (width, height))[0]
+                       for e in under):
+                there = element_at(elements, *point)
+                self.log(f"    ✗ backup position not used: {there.label() if there else 'nothing'} is there now, "
+                         "not the picked element", session)
+                return False
+        self.log(f"    ⚠ element not found — tapped its saved position ({float(x):g}%, {float(y):g}%)", session)
+        session.tap_percent(x, y)
+        return True
+
+    def _tap_picture(self, session: DeviceSession, pictures: list[str]) -> bool:
+        from . import imagematch
+
+        session.begin_pass()
+        shot = self._screenshot_gray(session)
+        width = session.window_size()[0]
+        scale = shot.shape[1] / width if width else 1.0
+        for path in pictures:
+            template = self._template(path)
+            if template is None:
+                continue
+            match = imagematch.search(shot, template)
+            if match is None:
+                continue
+            if not match.unique:
+                self.log("    ✗ picture not used: it appears more than once on screen", session)
+                continue
+            left, top, right, bottom = match.bounds
+            self.log(f"    ⚠ locators didn't settle — found by its picture ({match.score:.0%} match) and tapped it",
+                     session)
+            session.tap((left + right) / 2 / scale, (top + bottom) / 2 / scale)
+            return True
+        return False
 
     # ------------------------------------------------------------ Python
 
@@ -489,6 +808,12 @@ def _final_message(result: RunResult) -> str:
     if result.state == RunState.STOPPED:
         return "Stopped"
     return f"Failed: {result.error}" if result.error else "Failed"
+
+
+def _invalid_locator(exc: Exception) -> bool:
+    """A malformed locator (as opposed to e.g. "invalid session id", which means the phone is gone)."""
+    return (isinstance(exc, ValueError) or type(exc).__name__ == "InvalidSelectorException"
+            or "invalid selector" in str(exc).lower())
 
 
 def _first_line(exc: BaseException) -> str:

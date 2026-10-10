@@ -11,3 +11,4 @@ packaging/platform-tools/
 runs/
 configs/schedules.json
 settings.json
+configs/images/

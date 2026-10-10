@@ -109,17 +109,20 @@ def test_settings_roundtrip_and_default_timeout(tmp_path):
     target.write_text("{not json")
     assert app_settings.load(target).default_timeout_seconds == 15  # corrupt file -> defaults
 
-    class Recording(FakeSession):
-        def click(self, locator_type, locator_value, timeout_seconds=15):
-            self.calls.append(("timeout", timeout_seconds))
-
     app_settings.apply(app_settings.Settings(default_timeout_seconds=7))
-    session = Recording("s1")
-    ScriptRunner(session, {"name": "t", "steps": [
+    timeouts = []
+
+    def find(step, session, main, timeout, quiet=False):
+        timeouts.append(timeout)
+        return session.candidates(*main)[0]
+
+    runner = ScriptRunner(FakeSession("s1", {"id=x": ""}), {"name": "t", "steps": [
         {"action": "click", "locator_type": "id", "locator_value": "x"},
         {"action": "click", "locator_type": "id", "locator_value": "x", "timeout_seconds": 3},
-    ]}).run()
-    assert session.calls == [("timeout", 7.0), ("timeout", 3.0)]
+    ]})
+    runner._find = find
+    runner.run()
+    assert timeouts == [7.0, 3.0]
 
 
 def test_data_dir_falls_back_when_install_folder_is_read_only(tmp_path, monkeypatch):
@@ -250,3 +253,68 @@ def test_splash_and_error_dialog(app, monkeypatch, tmp_path):
     assert "app-2026-01-01.log" in captured["text"]
     assert "keep running" in captured["info"] and "KeyError" in captured["details"]
     assert captured["splash_visible"] is False  # the always-on-top splash never hides the dialog
+
+
+# --------------------------------------------------------------------- Appium server start
+
+
+FAKE_APPIUM = '''
+import http.server, json, sys, time
+port = int(sys.argv[sys.argv.index("--port") + 1])
+time.sleep(float(sys.argv[1]))  # pretend to be slow (antivirus scan on first start)
+class Status(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"value": {"ready": True}}).encode()
+        self.send_response(200); self.end_headers(); self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+http.server.HTTPServer(("127.0.0.1", port), Status).serve_forever()
+'''
+
+
+def _free_port():
+    import socket
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def test_slow_appium_start_waits_and_is_not_launched_twice(tmp_path, monkeypatch):
+    from core import appium_server
+
+    script = tmp_path / "fake_appium.py"
+    script.write_text(FAKE_APPIUM)
+    monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
+    monkeypatch.setattr(appium_server, "find_appium_command", lambda: [sys.executable, str(script), "1.5"])
+    server = appium_server.AppiumServer(f"http://127.0.0.1:{_free_port()}")
+    ticks = []
+    try:
+        assert not server.start(wait_seconds=0.5, on_wait=ticks.append)  # still starting: times out
+        first = server.process
+        assert first is not None and first.poll() is None
+        assert server.start(wait_seconds=10)  # "Retry": keeps waiting for the same process
+        assert server.process is first and ticks
+    finally:
+        server.stop()
+
+
+def test_stale_driver_manifest_is_reset(tmp_path):
+    from core.appium_server import repair_driver_manifest
+
+    cache = tmp_path / "home" / "node_modules" / ".cache" / "appium"
+    cache.mkdir(parents=True)
+    manifest = cache / "extensions.yaml"
+    real = tmp_path / "home" / "node_modules" / "appium-uiautomator2-driver"
+    real.mkdir()
+    manifest.write_text(f"drivers:\n  uiautomator2:\n    installPath: {real}\n")
+    assert not repair_driver_manifest(tmp_path / "home") and manifest.exists()  # paths fine: keep it
+    manifest.write_text("drivers:\n  uiautomator2:\n    installPath: D:\\a\\build\\appium-home\\node_modules\\x\n")
+    assert repair_driver_manifest(tmp_path / "home") and not manifest.exists()  # build machine path: reset
+    assert not repair_driver_manifest(tmp_path / "missing")
+
+
+def test_self_test_passes_from_source(capsys):
+    import main
+
+    assert main.self_test() == 0
+    assert '"appium_client": "ok: Appium-Python-Client' in capsys.readouterr().out

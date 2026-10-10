@@ -134,6 +134,12 @@ def test_nested_builder_cards_and_step_dialog(app, configs, window_factory):
     dialog.inputs["retries"].setValue(2)
     dialog._accept()
     assert dialog.result_step["retries"] == 2
+    assert "fallback_x" not in dialog.result_step  # optional number left empty stays off
+    dialog = StepDialog(editor, step={"action": "click", "locator_type": "id", "locator_value": "x",
+                                      "fallback_x": 50, "fallback_y": 12.5})
+    assert dialog.inputs["fallback_x"].value() == 50
+    dialog._accept()
+    assert (dialog.result_step["fallback_x"], dialog.result_step["fallback_y"]) == (50, 12.5)
 
     builder.duplicate_step(builder.steps, 0)
     builder.move_step(builder.steps[0]["then"], 0, 1)  # no-op, single child
@@ -158,8 +164,7 @@ def test_run_dialog_starts_cross_phone_workflow(app, configs, window_factory):
     assert set(dialog.picker.role_combos) == {"A", "B"}
     assert dialog.picker.mapping() == {"A": "P1", "B": "P2"}
     dialog.picker.role_combos["B"].setCurrentIndex(dialog.picker.role_combos["B"].findData("P1"))
-    dialog._accept()
-    assert dialog.result_request is None and "different phone" in dialog.error.text()
+    assert dialog.picker.problems() == []  # one phone may play several roles
     dialog.picker.role_combos["B"].setCurrentIndex(dialog.picker.role_combos["B"].findData("P2"))
     dialog.repeat.setValue(2)
     dialog._accept()
@@ -185,6 +190,16 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     inspector._click(100, 70)
     assert inspector.selected.text == "Order 1234"
     assert inspector.current_locator() == ("id", "com.shop:id/order")
+    inspector.locators.setCurrentRow(inspector.locators.count() - 1)  # highlight the fragile full path
+    inspector._add_step("click")
+    fragile_pick = editor.builder.steps.pop()
+    assert fragile_pick["locator_value"] == "com.shop:id/order"  # a stable locator stays the main one
+    tail = [alt["locator_value"] for alt in fragile_pick["alternatives"][-2:]]  # fragile ones last
+    assert tail[0].startswith("/hierarchy/android.widget.FrameLayout") and ".instance(" in tail[1]
+    inspector.locators.setCurrentRow(1)  # a stable one is honoured as main
+    inspector._add_step("click")
+    assert editor.builder.steps.pop()["locator_type"] == "text"
+    inspector.locators.setCurrentRow(0)
     inspector._add_step("copy_text")
     assert editor.builder.steps[-1]["action"] == "copy_text"
 
@@ -198,12 +213,70 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     assert recorded["locator_value"] == "com.shop:id/pay_row"
     inspector.close()
 
+    assert recorded["alternatives"][-1]["locator_type"] == "xpath"  # every other unique locator kept as backup
+    assert (recorded["fallback_x"], recorded["fallback_y"]) == (50.0, 81.2)  # centre of [20,600][380,700]
+
+    # Picking for the Edit Step dialog: all unique locators (highlighted one first) and the position.
+    from tests.test_targeting import _screen_png
+
+    session.shot, _ = _screen_png(icon_at=(330, 0))  # a realistic 400×800 screenshot
     picked = []
-    picker = InspectorWindow(window, on_pick=lambda t, v: picked.append((t, v)), serial="A1")
+    picker = window.open_inspector(on_pick=picked.append)
+    assert picker.isModal()  # otherwise the modal Edit Step dialog blocks it
     assert wait_for(app, lambda: bool(picker.elements))
     picker._click(380, 20)
     picker._use_locator()
-    assert picked == [("accessibility id", "Menu")]
+    menu_xpath = "/hierarchy/android.widget.FrameLayout/android.widget.ImageButton"
+    locators, position = picked[0]["locators"], picked[0]["position"]
+    assert picked[0]["target"]["class"] == "android.widget.ImageButton" and picked[0]["target"]["desc"] == "Menu"
+    assert picked[0]["screen"]["anchors"]  # landmarks recorded with the screen
+    assert locators[0] == ("accessibility id", "Menu") and locators[-1] == ("xpath", menu_xpath)
+    assert {t for t, _ in locators} == {"accessibility id", "android uiautomator", "xpath", "class name", "image"}
+    picture = next(v for t, v in locators if t == "image")
+    assert (configs / picture).is_file() and locators.index(("image", picture)) == len(locators) - 3  # before fragile
+    assert position == (92.5, 2.5)
+
+    from ui.script_editor import StepDialog
+
+    dialog = StepDialog(editor, step={"action": "click", "locator_type": "id", "locator_value": "old"},
+                        pick_locator=lambda apply: apply(picked[0]))
+    assert not dialog.verify_box.isEnabled()  # nothing recorded yet
+    dialog._pick()
+    assert dialog.verify_box.isEnabled() and dialog.verify_box.isChecked()
+    assert "ImageButton" in dialog.verify_label.text()
+    assert dialog.inputs["locator_type"].currentText() == "accessibility id"
+    assert dialog.inputs["locator_value"].text() == "Menu"
+    backups = [{"locator_type": t, "locator_value": v} for t, v in locators[1:]]
+    assert dialog.alternatives.locators() == backups
+    assert dialog.inputs["fallback_x"].value() == 92.5
+    dialog.alternatives.value_edit.setText("Menu button")
+    dialog.alternatives.type_combo.setCurrentText("text")
+    dialog.alternatives._add()
+    dialog.alternatives.list.setCurrentRow(dialog.alternatives.list.count() - 1)
+    while dialog.alternatives.list.currentRow() > 0:
+        dialog.alternatives._move(-1)
+    dialog._promote_alternative()  # "text=Menu button" becomes main, Menu goes to the backups
+    dialog.screen_box.setChecked(False)
+    assert dialog.agree.value() == 0 and dialog.agree.text() == "Auto"
+    dialog.agree.setValue(3)
+    from PySide6.QtCore import Qt
+
+    image_rows = [i for i in range(dialog.alternatives.list.count())
+                  if dialog.alternatives.list.item(i).data(Qt.UserRole)[0] == "image"]
+    assert image_rows and not dialog.alternatives.list.item(image_rows[0]).icon().isNull()  # thumbnail shown
+    dialog._accept()
+    assert dialog.result_step["min_agree"] == 3
+    assert dialog.result_step["target"]["desc"] == "Menu" and "verify" not in dialog.result_step
+    assert dialog.result_step["check_screen"] is False and dialog.result_step["screen"]
+    assert dialog.result_step["locator_type"] == "text"
+    assert dialog.result_step["alternatives"] == [{"locator_type": "accessibility id", "locator_value": "Menu"}] \
+        + backups
+    dialog.alternatives._add()
+    dialog.alternatives.value_edit.setText("//bad")
+    dialog.alternatives.type_combo.setCurrentText("id")
+    dialog.alternatives._add()
+    dialog._accept()
+    assert "XPath" in dialog.alternatives_error.text()
     editor.close()
 
 
@@ -267,4 +340,37 @@ def test_developer_mode_runs_and_saves(app, configs, window_factory):
     assert (configs / "scripts" / "dev_test.py").exists()
     window.reload_scripts()
     assert window.rows["A1"].script_combo.findText("dev_test  [Developer Script]") >= 0
+    editor.close()
+
+
+def test_step_names_and_roles_to_names(app, configs, window_factory):
+    from core.schema import describe_step, roles_to_titles
+    from ui.script_editor import ScriptEditorWindow, StepDialog
+
+    window = window_factory({})
+    editor = ScriptEditorWindow(window)
+    editor.builder.steps = [
+        {"action": "click", "locator_type": "text", "locator_value": "Video", "device": "video tab"},
+        {"action": "repeat", "times": 2, "device": "loop", "steps": [
+            {"action": "press_key", "key": "back", "device": "go back", "title": "Back"}]},
+        {"action": "wait", "seconds": 1},
+    ]
+    editor.builder.render()
+    assert editor.builder.roles_button.isVisibleTo(editor)
+    changed = roles_to_titles(editor.builder.steps)
+    editor.builder.render()
+    assert changed == 3 and not editor.builder.roles()
+    assert not editor.builder.roles_button.isVisibleTo(editor)
+    assert editor.builder.steps[0]["title"] == "video tab" and "device" not in editor.builder.steps[0]
+    assert editor.builder.steps[1]["steps"][0]["title"] == "Back (go back)"
+    assert describe_step(editor.builder.steps[0]) == "video tab — Click text=Video"
+
+    # Step name is the first field, saved with the step; the dialog never outgrows the screen.
+    dialog = StepDialog(editor, step=editor.builder.steps[0])
+    assert dialog.inputs["title"].text() == "video tab"
+    dialog.inputs["title"].setText("Open Video tab")
+    dialog._accept()
+    assert dialog.result_step["title"] == "Open Video tab"
+    screen = dialog.screen().availableGeometry().height()
+    assert dialog.height() <= screen
     editor.close()
