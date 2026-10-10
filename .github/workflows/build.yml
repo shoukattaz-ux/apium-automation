@@ -108,6 +108,29 @@ jobs:
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp "/DAppVersion=${{ steps.version.outputs.version }}" packaging\installer.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+      - name: Test upgrading over a running install
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          # Reproduces "DeleteFile failed; code 5" on AdbWinApi.dll: the app's adb server keeps
+          # running after the app closes and locks its files. The installer must stop it.
+          $setup = (Get-ChildItem dist/installer/*.exe | Select-Object -First 1).FullName
+          $app = "$env:LOCALAPPDATA\Programs\Device Automation Dashboard"
+          function Install($log) {
+            $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/CURRENTUSER", "/NORESTART", "/LOG=$log" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40; throw "Install failed (exit $($p.ExitCode))" }
+          }
+          Install "$env:RUNNER_TEMP\install1.log"
+          if (Test-Path "$app\platform-tools\adb.exe") {
+            Start-Process "$app\platform-tools\adb.exe" -ArgumentList "start-server" -Wait -WindowStyle Hidden
+            $running = Get-Process adb -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$app\*" }
+            if (-not $running) { throw "Test setup: adb server did not start" }
+            "adb server running from the install folder (pid $($running.Id))"
+          }
+          Install "$env:RUNNER_TEMP\install2.log"
+          "Upgrade over a running install succeeded"
+          Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          if (Get-Process adb -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$app\*" }) { throw "adb still running after uninstall" }
       - name: Zip portable build
         shell: pwsh
         run: Compress-Archive -Path dist/DeviceAutomation/* -DestinationPath "dist/DeviceAutomation-portable-${{ steps.version.outputs.version }}.zip"
