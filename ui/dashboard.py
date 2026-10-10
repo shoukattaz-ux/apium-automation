@@ -730,7 +730,12 @@ class MainWindow(QMainWindow):
             add_steps = editor.builder.append_steps
         idle = [s for s, _ in self.connected_devices() if not self.manager.is_running(s)]
         serial = self.selected_serial if self.selected_serial in idle else (idle[0] if idle else None)
-        return self._track(InspectorWindow(self, add_steps=add_steps, on_pick=on_pick, roles=roles, serial=serial))
+        window = InspectorWindow(self, add_steps=add_steps, on_pick=on_pick, roles=roles, serial=serial)
+        if on_pick:
+            # Opened from the (modal) Edit Step dialog, which blocks every other window:
+            # the picker must be modal too, on top of it, or it can't be clicked.
+            window.setWindowModality(Qt.ApplicationModal)
+        return self._track(window)
 
     def open_settings(self) -> None:
         from .settings_dialog import SettingsDialog

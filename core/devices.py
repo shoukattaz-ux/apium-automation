@@ -304,6 +304,34 @@ class DeviceSession:
         except ElementNotFound:
             return False
 
+    def first_present(self, locators: list[tuple[str, str]], timeout_seconds: float = 15) -> int | None:
+        """Index of the first of ``locators`` that matches an element, or None after the timeout.
+
+        All locators are checked on every pass (about twice a second), in order, so a
+        backup locator is found as soon as it matches instead of after the earlier
+        ones each use up a full timeout. A malformed locator is reported and skipped.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        usable = list(range(len(locators)))
+        while True:
+            for index in list(usable):
+                if self.should_stop():
+                    raise RunStopped()
+                locator_type, locator_value = locators[index]
+                try:
+                    if self.exists(locator_type, locator_value, timeout_seconds=0):
+                        return index
+                except ElementNotFound:
+                    pass
+                except Exception as exc:  # invalid selector: no point asking again
+                    if "invalid" not in str(exc).lower() and not isinstance(exc, ValueError):
+                        raise
+                    log.warning("Locator %s=%s is invalid: %s", locator_type, locator_value, _short_error(exc))
+                    usable.remove(index)
+            if not usable or time.monotonic() >= deadline:
+                return None
+            time.sleep(0.5)
+
     def close_app(self, package: str) -> None:
         """Force-stop an app."""
         try:

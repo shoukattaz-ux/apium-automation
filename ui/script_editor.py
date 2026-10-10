@@ -24,7 +24,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QFontDatabase, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -32,7 +32,8 @@ from core import paths
 from core.devices import DeviceError, list_installed_packages
 from core.settings import default_timeout
 from core.schema import (
-    ACTION_LABELS, ACTIONS, BLOCK_LABELS, COMMON_FIELDS, DEFAULT_TIMEOUT_SECONDS, FieldSpec, ScriptError, describe_step, format_path,
+    ACTION_LABELS, ACTIONS, BLOCK_LABELS, COMMON_FIELDS, DEFAULT_TIMEOUT_SECONDS, LOCATOR_ACTIONS, LOCATOR_TYPES,
+    FieldSpec, ScriptError, describe_step, format_path,
     safe_filename, save_script, script_roles, script_variables, validate_script, validate_step,
 )
 
@@ -61,7 +62,99 @@ def run(device):
     device.scroll("down", times=2)
 '''
 
-PickLocator = Callable[[Callable[[str, str], None]], None]
+# Opens the element picker; it calls back with the locators (best first) and the
+# element's centre as (x %, y %) or None.
+PickLocator = Callable[[Callable[[list, "tuple[float, float] | None"], None]], None]
+
+
+class LocatorListEditor(QWidget):
+    """Backup locators for a step: tried in order when the main locator doesn't match."""
+
+    def __init__(self, locators: list[dict] | None = None, parent=None):
+        super().__init__(parent)
+        self.list = QListWidget()
+        self.list.setMaximumHeight(110)
+        self.list.setToolTip("Tried in this order when the main locator doesn't find the element")
+        self.type_combo = QComboBox()
+        self.type_combo.addItems(LOCATOR_TYPES)
+        self.type_combo.setCurrentText("xpath")
+        self.value_edit = QLineEdit()
+        self.value_edit.setPlaceholderText("Another way to find the same element")
+        self.value_edit.returnPressed.connect(self._add)
+        add = QPushButton("＋ Add")
+        add.clicked.connect(self._add)
+        entry = QHBoxLayout()
+        entry.addWidget(self.type_combo)
+        entry.addWidget(self.value_edit, 1)
+        entry.addWidget(add)
+        self.up = QPushButton("↑")
+        self.down = QPushButton("↓")
+        self.remove = QPushButton("Remove")
+        self.promote = QPushButton("Make main")
+        self.promote.setToolTip("Swap this one with the main locator")
+        self.up.clicked.connect(lambda: self._move(-1))
+        self.down.clicked.connect(lambda: self._move(1))
+        self.remove.clicked.connect(self._remove)
+        buttons = QHBoxLayout()
+        for button in (self.up, self.down, self.remove, self.promote):
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self.list)
+        layout.addLayout(buttons)
+        layout.addLayout(entry)
+        self.list.currentRowChanged.connect(lambda _: self._update_buttons())
+        self.set_locators(locators or [])
+
+    def set_locators(self, locators: list[dict]) -> None:
+        self.list.clear()
+        for locator in locators:
+            self._append(locator["locator_type"], str(locator["locator_value"]))
+        self._update_buttons()
+
+    def locators(self) -> list[dict]:
+        return [dict(zip(("locator_type", "locator_value"), self.list.item(i).data(Qt.UserRole)))
+                for i in range(self.list.count())]
+
+    def _append(self, locator_type: str, locator_value: str) -> None:
+        item = QListWidgetItem(f"{self.list.count() + 2}.  {locator_type}  =  {locator_value}")
+        item.setData(Qt.UserRole, (locator_type, locator_value))
+        item.setToolTip(locator_value)
+        self.list.addItem(item)
+
+    def _renumber(self) -> None:
+        self.set_locators(self.locators())
+
+    def _add(self) -> None:
+        value = self.value_edit.text().strip()
+        if value:
+            self._append(self.type_combo.currentText(), value)
+            self.value_edit.clear()
+            self._update_buttons()
+
+    def _move(self, delta: int) -> None:
+        row = self.list.currentRow()
+        locators = self.locators()
+        if 0 <= row + delta < len(locators):
+            locators.insert(row + delta, locators.pop(row))
+            self.set_locators(locators)
+            self.list.setCurrentRow(row + delta)
+
+    def _remove(self) -> None:
+        locators = self.locators()
+        row = self.list.currentRow()
+        if 0 <= row < len(locators):
+            del locators[row]
+            self.set_locators(locators)
+
+    def _update_buttons(self) -> None:
+        row = self.list.currentRow()
+        self.up.setEnabled(row > 0)
+        self.down.setEnabled(0 <= row < self.list.count() - 1)
+        self.remove.setEnabled(row >= 0)
+        self.promote.setEnabled(row >= 0)
 
 
 # ======================================================================= helpers
@@ -171,6 +264,9 @@ class StepDialog(QDialog):
         self.inputs: dict[str, QWidget] = {}
         self.errors: dict[str, QLabel] = {}
         self.result_step: dict | None = None
+        self.alternatives: LocatorListEditor | None = None
+        self.alternatives_error = QLabel()
+        self.alternatives_error.setObjectName("Error")
 
         self.action_combo = QComboBox()
         group = None
@@ -236,11 +332,50 @@ class StepDialog(QDialog):
         self.action_help.setText(spec.description)
         for field_spec in spec.fields:
             self._add_field(self.form, field_spec, step)
+            if field_spec.name == "locator_value":
+                self._add_alternatives(step)
+        if self.action() not in LOCATOR_ACTIONS:
+            self.alternatives = None
         self.advanced.setVisible(spec.uses_device)
         if spec.uses_device:
             for field_spec in COMMON_FIELDS:
                 self._add_field(self.advanced_form, field_spec, step)
         self.adjustSize()
+
+    def _add_alternatives(self, step: dict | None) -> None:
+        self.alternatives = LocatorListEditor((step or {}).get("alternatives") or [])
+        self.alternatives.promote.clicked.connect(self._promote_alternative)
+        self.alternatives_error = QLabel()
+        self.alternatives_error.setObjectName("Error")
+        self.alternatives_error.hide()
+        container = QWidget()
+        column = QVBoxLayout(container)
+        column.setContentsMargins(0, 0, 0, 6)
+        column.setSpacing(2)
+        column.addWidget(self.alternatives)
+        hint = QLabel("If the main locator doesn't find the element, these are tried in order. "
+                      "“Pick from screen…” fills them in for you.")
+        hint.setObjectName("Muted")
+        hint.setWordWrap(True)
+        column.addWidget(hint)
+        column.addWidget(self.alternatives_error)
+        self.form.addRow("Backup locators (optional)", container)
+
+    def _promote_alternative(self) -> None:
+        editor = self.alternatives
+        row = editor.list.currentRow()
+        locators = editor.locators()
+        if not (0 <= row < len(locators)):
+            return
+        chosen = locators[row]
+        main = {"locator_type": self.inputs["locator_type"].currentText(),
+                "locator_value": self.inputs["locator_value"].text().strip()}
+        locators[row] = main
+        if not main["locator_value"]:
+            del locators[row]
+        self.inputs["locator_type"].setCurrentText(chosen["locator_type"])
+        self.inputs["locator_value"].setText(chosen["locator_value"])
+        editor.set_locators(locators)
 
     def _add_field(self, form: QFormLayout, spec: FieldSpec, step: dict | None) -> None:
         default = spec.default
@@ -338,9 +473,15 @@ class StepDialog(QDialog):
             self.inputs["package"].setText(dialog.selected_package())
 
     def _pick(self) -> None:
-        def apply(locator_type: str, locator_value: str) -> None:
+        def apply(locators: list, position: tuple[float, float] | None = None) -> None:
+            (locator_type, locator_value), backups = locators[0], locators[1:]
             self.inputs["locator_type"].setCurrentText(locator_type)
             self.inputs["locator_value"].setText(locator_value)
+            if self.alternatives is not None:
+                self.alternatives.set_locators([{"locator_type": t, "locator_value": v} for t, v in backups])
+            if position and "fallback_x" in self.inputs:
+                self.inputs["fallback_x"].setValue(position[0])
+                self.inputs["fallback_y"].setValue(position[1])
             self.raise_()
             self.activateWindow()
         self.pick_locator(apply)
@@ -351,6 +492,8 @@ class StepDialog(QDialog):
             value = self._value(widget)
             if value != "":
                 step[name] = value
+        if self.alternatives is not None and self.alternatives.locators():
+            step["alternatives"] = self.alternatives.locators()
         for key in ACTIONS[self.action()].blocks:
             step[key] = copy.deepcopy(self.original.get(key, []))
         return step
@@ -365,6 +508,8 @@ class StepDialog(QDialog):
             widget = self.inputs[name]
             widget.setProperty("invalid", "true" if message else "false")
             _repolish(widget)
+        self.alternatives_error.setText(problems.get("alternatives", ""))
+        self.alternatives_error.setVisible("alternatives" in problems)
         self.action_error.setText(problems.get("action", ""))
         self.action_error.setVisible("action" in problems)
         if problems:

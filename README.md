@@ -138,6 +138,12 @@ The Appium URL defaults to `http://127.0.0.1:4723`; override it with
 | `if_exists` | locator, `timeout_seconds`, `then`, `else` |
 | `stop_run` | `message` |
 
+Steps that find an element (`click`, `wait_for_element`, `copy_text`,
+`paste_text`, `if_exists`) also accept `alternatives`: backup locators, e.g.
+`[{"locator_type": "xpath", "locator_value": "//*[@content-desc=\"Video\"]/.."}]`.
+All of them are checked about twice a second until the timeout and the first
+one in the list that matches is used. "Pick from screen…" fills them in.
+
 Locator types: `id`, `xpath`, `accessibility id`, `text` (exact visible text),
 `class name`, `android uiautomator`. All device steps also accept `device`
 (phone role), `retries` and `on_fail` (`skip` or `stop`). Built-in variables:

@@ -385,3 +385,36 @@ def test_click_falls_back_to_saved_position():
 
     assert validate_step({"action": "click", "locator_type": "id", "locator_value": "x", "fallback_x": 5}) == {
         "fallback_y": "Set both X and Y for the backup tap, or neither"}
+
+
+def test_backup_locators_are_tried_in_order():
+    session = FakeSession("S1", screen={"text=Video": "Video", "xpath=//backup": "b"})
+    lines = []
+    script = {"name": "alts", "steps": [
+        {"action": "click", "locator_type": "id", "locator_value": "gone", "timeout_seconds": 0,
+         "alternatives": [{"locator_type": "xpath", "locator_value": "//also-gone"},
+                          {"locator_type": "text", "locator_value": "Video"},
+                          {"locator_type": "xpath", "locator_value": "//backup"}]},
+        {"action": "if_exists", "locator_type": "id", "locator_value": "gone", "timeout_seconds": 0,
+         "alternatives": [{"locator_type": "xpath", "locator_value": "//backup"}],
+         "then": [{"action": "press_key", "key": "back"}]},
+        {"action": "click", "locator_type": "id", "locator_value": "gone", "timeout_seconds": 0,
+         "alternatives": [{"locator_type": "id", "locator_value": "nope"}], "fallback_x": 10, "fallback_y": 10},
+    ]}
+    result = ScriptRunner(session, script, on_log=lambda *args: lines.append(str(args[-1]))).run()
+    assert ("click", "text=Video") in session.calls and ("click", "xpath=//backup") not in session.calls
+    assert any("found with backup 3: text=Video" in line for line in lines)
+    assert ("key", "back") in session.calls
+    assert ("tap", 40, 80) in session.calls  # no locator matched: backup position
+    assert not result.skipped_steps
+
+    step = {"action": "click", "locator_type": "android uiautomator",
+            "locator_value": "/android.widget.FrameLayout/android.view.ViewGroup[2]"}
+    assert "XPath" in validate_step(step)["locator_value"]
+    assert "XPath" in validate_step({"action": "click", "locator_type": "xpath", "locator_value": "//a",
+                                     "alternatives": [{"locator_type": "id", "locator_value": "(//a)[1]"}]}
+                                    )["alternatives"]
+    saved = normalize_step({"action": "copy_text", "locator_type": "id", "locator_value": "a", "save_as": "x",
+                            "alternatives": [{"locator_type": "text", "locator_value": " b "}, {"locator_type": "id"}]})
+    assert saved["alternatives"] == [{"locator_type": "text", "locator_value": "b"}]
+    assert "+1 backup locator" in describe_step(saved)

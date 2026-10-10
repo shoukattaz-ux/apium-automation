@@ -128,6 +128,7 @@ class InspectorWindow(QWidget):
         self.on_pick = on_pick
         self.elements: list[UiElement] = []
         self.selected: UiElement | None = None
+        self.suggestions: list = []
         self._busy = False
         self.signals = _Signals(self)  # parented: dropped with the window if a worker finishes late
         self.signals.loaded.connect(self._show_screen)
@@ -198,7 +199,9 @@ class InspectorWindow(QWidget):
 
         actions = QVBoxLayout()
         if on_pick:
-            use = QPushButton("Use this locator")
+            use = QPushButton("Use these locators")
+            use.setToolTip("The highlighted locator becomes the main one; the other unique ones are saved "
+                           "as backups, tried in order if it doesn't match")
             use.setObjectName("Primary")
             use.clicked.connect(self._use_locator)
             actions.addWidget(use)
@@ -312,6 +315,7 @@ class InspectorWindow(QWidget):
     def _show_details(self, element: UiElement | None) -> None:
         self.table.setRowCount(0)
         self.locators.clear()
+        self.suggestions = []
         if element is None:
             self.title.setText("Nothing selected")
             return
@@ -323,7 +327,8 @@ class InspectorWindow(QWidget):
                 self.table.insertRow(row)
                 self.table.setItem(row, 0, QTableWidgetItem(name))
                 self.table.setItem(row, 1, QTableWidgetItem(value))
-        for suggestion in suggest_locators(element, self.elements):
+        self.suggestions = suggest_locators(element, self.elements)
+        for suggestion in self.suggestions:
             badge = "✓ unique" if suggestion.unique else f"matches {suggestion.matches}"
             if suggestion.fragile:
                 badge += " · fragile: breaks if the screen scrolls or changes"
@@ -334,15 +339,26 @@ class InspectorWindow(QWidget):
 
     def current_locator(self) -> tuple[str, str] | None:
         item = self.locators.currentItem()
-        return item.data(Qt.UserRole) if item else None
+        return tuple(item.data(Qt.UserRole)) if item else None
 
     # ------------------------------------------------------------------ actions
 
     def _role(self) -> str:
         return self.role_combo.currentText().strip()
 
+    def ranked_locators(self) -> list[tuple[str, str]]:
+        """The highlighted locator, then every other unique one in robustness order."""
+        chosen = self.current_locator()
+        ranked = [(s.locator_type, s.locator_value) for s in self.suggestions if s.unique]
+        if chosen:
+            ranked = [chosen] + [loc for loc in ranked if loc != tuple(chosen)]
+        return ranked
+
     def _step_for(self, action: str, locator: tuple[str, str]) -> dict:
         step: dict = {"action": action, "locator_type": locator[0], "locator_value": locator[1]}
+        backups = [loc for loc in self.ranked_locators() if loc != tuple(locator)]
+        if backups:
+            step["alternatives"] = [{"locator_type": t, "locator_value": v} for t, v in backups]
         if action == "click":
             step.update(self._fallback_position())
         if action == "copy_text":
@@ -363,12 +379,16 @@ class InspectorWindow(QWidget):
 
     def _fallback_position(self) -> dict:
         """The selected element's centre as percent of the screen, as a Click step's backup tap."""
-        pixmap = self.screen.pixmap
-        if self.selected is None or pixmap is None or pixmap.isNull():
+        if self.selected is None or not self.elements:
+            return {}
+        # Measure against the layout's own extent (what element bounds are in), not the screenshot's pixels.
+        width = max(e.bounds[2] for e in self.elements)
+        height = max(e.bounds[3] for e in self.elements)
+        if width <= 0 or height <= 0:
             return {}
         left, top, right, bottom = self.selected.bounds
-        return {"fallback_x": round((left + right) / 2 / pixmap.width() * 100, 1),
-                "fallback_y": round((top + bottom) / 2 / pixmap.height() * 100, 1)}
+        return {"fallback_x": round(min(100.0, max(0.0, (left + right) / 2 / width * 100)), 1),
+                "fallback_y": round(min(100.0, max(0.0, (top + bottom) / 2 / height * 100)), 1)}
 
     def _add_step(self, action: str) -> None:
         locator = self.current_locator()
@@ -378,9 +398,10 @@ class InspectorWindow(QWidget):
         self.status.setText(f"Added {action.replace('_', ' ')} step")
 
     def _use_locator(self) -> None:
-        locator = self.current_locator()
-        if locator and self.on_pick:
-            self.on_pick(*locator)
+        locators = self.ranked_locators()
+        if locators and self.on_pick:
+            position = self._fallback_position()
+            self.on_pick(locators, (position["fallback_x"], position["fallback_y"]) if position else None)
             self.close()
 
     def _copy_locator(self) -> None:

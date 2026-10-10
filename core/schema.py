@@ -184,6 +184,12 @@ ON_FAIL_FIELD = FieldSpec("on_fail", "If it fails", "choice", required=False, de
                           choices=tuple(ON_FAIL), help="skip = log and carry on, stop = end the run")
 COMMON_FIELDS = (DEVICE_FIELD, RETRIES_FIELD, ON_FAIL_FIELD)
 
+# Actions that find an element; they also accept ``alternatives``: backup locators
+# ([{"locator_type": ..., "locator_value": ...}, ...]) tried when the main one doesn't match.
+LOCATOR_ACTIONS = frozenset(key for key, spec in ACTIONS.items()
+                            if any(f.name == "locator_type" for f in spec.fields))
+_LOOKS_LIKE_XPATH = re.compile(r"^\(?\s*/")
+
 _VARIABLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
@@ -299,10 +305,34 @@ def validate_step(step: dict) -> dict[str, str]:
 
     if action == "paste_text" and not step.get("value_from") and not step.get("text"):
         errors["value_from"] = "Choose a variable to paste, or enter text to type"
+    if action in LOCATOR_ACTIONS:
+        hint = _locator_problem(step.get("locator_type"), step.get("locator_value"))
+        if hint and "locator_value" not in errors:
+            errors["locator_value"] = hint
+        alternatives = step.get("alternatives") or []
+        if not isinstance(alternatives, list):
+            errors["alternatives"] = "Backup locators must be a list"
+        else:
+            for number, alt in enumerate(alternatives, 2):
+                if not isinstance(alt, dict) or alt.get("locator_type") not in LOCATOR_TYPES \
+                        or not str(alt.get("locator_value", "")).strip():
+                    errors["alternatives"] = f"Backup locator {number} needs a type and a value"
+                    break
+                hint = _locator_problem(alt["locator_type"], alt["locator_value"])
+                if hint:
+                    errors["alternatives"] = f"Backup locator {number}: {hint}"
+                    break
     if action == "click" and (step.get("fallback_x") is None) != (step.get("fallback_y") is None):
         errors["fallback_y" if step.get("fallback_y") is None else "fallback_x"] = \
             "Set both X and Y for the backup tap, or neither"
     return errors
+
+
+def _locator_problem(locator_type: Any, locator_value: Any) -> str:
+    """Catch the common mix-up of an XPath saved under another locator type."""
+    if locator_type != "xpath" and isinstance(locator_value, str) and _LOOKS_LIKE_XPATH.match(locator_value):
+        return "This value is an XPath — set “Find element by” to xpath"
+    return ""
 
 
 def validate_steps(steps: Any, path: tuple[int, ...] = (), depth: int = 0) -> list[str]:
@@ -366,6 +396,12 @@ def normalize_step(step: dict) -> dict:
         if spec in COMMON_FIELDS and value == spec.default:
             continue  # keep saved files short: retries 0 / on_fail skip are implied
         clean[spec.name] = value
+    if action in LOCATOR_ACTIONS and isinstance(step.get("alternatives"), list):
+        alternatives = [{"locator_type": a["locator_type"], "locator_value": str(a["locator_value"]).strip()}
+                        for a in step["alternatives"]
+                        if isinstance(a, dict) and a.get("locator_type") and str(a.get("locator_value", "")).strip()]
+        if alternatives:
+            clean["alternatives"] = alternatives
     for key in ACTIONS[action].blocks:
         children = step.get(key) or []
         if children or key != "else":
@@ -415,6 +451,9 @@ def describe_step(step: dict) -> str:
     else:
         text = f"{label} {target}"
     extras = []
+    if step.get("alternatives"):
+        count = len(step["alternatives"])
+        extras.append(f"+{count} backup locator{'s' if count > 1 else ''}")
     if step.get("retries"):
         extras.append(f"{step['retries']} retries")
     if step.get("on_fail") == "stop":

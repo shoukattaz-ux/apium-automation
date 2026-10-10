@@ -26,7 +26,7 @@ from .devices import DeviceError, DeviceSession, ElementNotFound, RunStopped
 from .history import RunRecorder, StepRecord
 from .settings import default_timeout
 from .schema import (
-    ACTIONS, ScriptError, describe_step, format_path, load_script, render,
+    ACTIONS, LOCATOR_ACTIONS, ScriptError, describe_step, format_path, load_script, render,
     script_roles,
 )
 
@@ -388,6 +388,13 @@ class ScriptRunner:
 
         timeout = float(step.get("timeout_seconds", default_timeout()))
         locator = (step.get("locator_type"), value("locator_value"))
+        if action in LOCATOR_ACTIONS and step.get("alternatives") and action != "if_exists":
+            try:
+                locator, timeout = self._locate(step, session, locator, timeout)
+            except ElementNotFound:
+                if action == "click" and self._tap_fallback(step, session):
+                    return None
+                raise
 
         if action == "wait":
             self._sleep(float(step["seconds"]))
@@ -401,15 +408,11 @@ class ScriptRunner:
         elif action == "close_app":
             session.close_app(value("package"))
         elif action == "click":
-            fallback = step.get("fallback_x"), step.get("fallback_y")
             try:
                 session.click(*locator, timeout_seconds=timeout)
             except ElementNotFound:
-                if None in fallback:
+                if not self._tap_fallback(step, session):
                     raise
-                self.log(f"    ⚠ element not found — tapped its saved position "
-                         f"({float(fallback[0]):g}%, {float(fallback[1]):g}%)", session)
-                session.tap_percent(*fallback)
         elif action == "wait_for_element":
             session.wait_for_element(*locator, timeout_seconds=timeout)
         elif action == "copy_text":
@@ -440,10 +443,38 @@ class ScriptRunner:
             png = session.screenshot_png()
             return self.recorder.save_screenshot(png, value("name", "screenshot")) if self.recorder else ""
         elif action == "if_exists":
-            return session.exists(*locator, timeout_seconds=float(step.get("timeout_seconds", 3)))
+            wait = float(step.get("timeout_seconds", 3))
+            if step.get("alternatives"):
+                return session.first_present(self._locators(step, locator), wait) is not None
+            return session.exists(*locator, timeout_seconds=wait)
         else:
             raise DeviceError(f"Unknown action {action!r}")
         return None
+
+    def _tap_fallback(self, step: dict, session: DeviceSession) -> bool:
+        """Tap a Click step's saved backup position, if it has one."""
+        x, y = step.get("fallback_x"), step.get("fallback_y")
+        if x is None or y is None:
+            return False
+        self.log(f"    ⚠ element not found — tapped its saved position ({float(x):g}%, {float(y):g}%)", session)
+        session.tap_percent(x, y)
+        return True
+
+    def _locators(self, step: dict, main: tuple[str, str]) -> list[tuple[str, str]]:
+        return [main] + [(alt["locator_type"], render(str(alt["locator_value"]), self.variables))
+                         for alt in step.get("alternatives", [])]
+
+    def _locate(self, step: dict, session: DeviceSession, main: tuple[str, str],
+                timeout: float) -> tuple[tuple[str, str], float]:
+        """Pick the first of the step's locators that matches; the action then runs with it."""
+        locators = self._locators(step, main)
+        index = session.first_present(locators, timeout)
+        if index is None:
+            raise ElementNotFound(f"Element not found within {timeout:g}s by any of its {len(locators)} locators")
+        if index:
+            self.log(f"    ↪ main locator didn't match; found with backup {index + 1}: "
+                     f"{locators[index][0]}={locators[index][1]}", session)
+        return locators[index], min(timeout, 5.0)  # it's on screen now
 
     # ------------------------------------------------------------ Python
 

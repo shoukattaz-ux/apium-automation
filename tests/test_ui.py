@@ -204,12 +204,46 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     assert recorded["locator_value"] == "com.shop:id/pay_row"
     inspector.close()
 
+    assert recorded["alternatives"][-1]["locator_type"] == "xpath"  # every other unique locator kept as backup
+    assert (recorded["fallback_x"], recorded["fallback_y"]) == (50.0, 81.2)  # centre of [20,600][380,700]
+
+    # Picking for the Edit Step dialog: all unique locators (highlighted one first) and the position.
     picked = []
-    picker = InspectorWindow(window, on_pick=lambda t, v: picked.append((t, v)), serial="A1")
+    picker = window.open_inspector(on_pick=lambda locators, position: picked.append((locators, position)))
+    assert picker.isModal()  # otherwise the modal Edit Step dialog blocks it
     assert wait_for(app, lambda: bool(picker.elements))
     picker._click(380, 20)
     picker._use_locator()
-    assert picked == [("accessibility id", "Menu")]
+    menu_xpath = "/android.widget.FrameLayout/android.widget.ImageButton"
+    assert picked == [([("accessibility id", "Menu"), ("xpath", menu_xpath)], (92.5, 2.5))]
+
+    from ui.script_editor import StepDialog
+
+    dialog = StepDialog(editor, step={"action": "click", "locator_type": "id", "locator_value": "old"},
+                        pick_locator=lambda apply: apply(*picked[0]))
+    dialog._pick()
+    assert dialog.inputs["locator_type"].currentText() == "accessibility id"
+    assert dialog.inputs["locator_value"].text() == "Menu"
+    assert dialog.alternatives.locators() == [{"locator_type": "xpath", "locator_value": menu_xpath}]
+    assert dialog.inputs["fallback_x"].value() == 92.5
+    dialog.alternatives.value_edit.setText("Menu button")
+    dialog.alternatives.type_combo.setCurrentText("text")
+    dialog.alternatives._add()
+    dialog.alternatives.list.setCurrentRow(1)
+    dialog.alternatives._move(-1)
+    dialog.alternatives.list.setCurrentRow(0)
+    dialog._promote_alternative()  # "text=Menu button" becomes main, Menu goes to the backups
+    dialog._accept()
+    assert dialog.result_step["locator_type"] == "text"
+    assert dialog.result_step["alternatives"] == [
+        {"locator_type": "accessibility id", "locator_value": "Menu"},
+        {"locator_type": "xpath", "locator_value": menu_xpath}]
+    dialog.alternatives._add()
+    dialog.alternatives.value_edit.setText("//bad")
+    dialog.alternatives.type_combo.setCurrentText("id")
+    dialog.alternatives._add()
+    dialog._accept()
+    assert "XPath" in dialog.alternatives_error.text()
     editor.close()
 
 
