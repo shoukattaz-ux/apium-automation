@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import time
 
+import pytest
+
 from core import appium_server, paths
 from core.devices import connection_lost, friendly_error
 from tests.fakes import FakeSession
@@ -170,3 +172,47 @@ def test_picker_shows_what_it_is_waiting_for(app, window_factory, monkeypatch):
         picker.close()
     finally:
         release.set()
+
+
+def test_screenshots_come_from_adb_and_fall_back_to_appium(monkeypatch):
+    import subprocess as sp
+
+    from core import devices
+    from tests.fakes import tiny_png
+
+    png = tiny_png()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return sp.CompletedProcess(command, 0, stdout=png, stderr=b"")
+
+    monkeypatch.setattr(devices.subprocess, "run", fake_run)
+
+    class Driver:
+        def get_screenshot_as_png(self):
+            return b"appium"
+
+    session = devices.DeviceSession("S1", connect=False)
+    session.driver = Driver()
+    assert session.screenshot_png() == png
+    assert calls[-1][-4:] == ["S1", "exec-out", "screencap", "-p"][-4:] and "exec-out" in calls[-1]
+
+    def broken(command, **kwargs):
+        calls.append(command)
+        return sp.CompletedProcess(command, 1, stdout=b"", stderr=b"error: closed")
+
+    monkeypatch.setattr(devices.subprocess, "run", broken)
+    session = devices.DeviceSession("S2", connect=False)
+    session.driver = Driver()
+    count = len(calls)
+    assert session.screenshot_png() == b"appium"   # falls back
+    assert session.screenshot_png() == b"appium"   # and doesn't keep retrying adb on this phone
+    assert len(calls) == count + 1
+
+    def slow(command, **kwargs):
+        raise sp.TimeoutExpired(command, kwargs.get("timeout"))
+
+    monkeypatch.setattr(devices.subprocess, "run", slow)
+    with pytest.raises(devices.DeviceError, match="timed out"):
+        devices.adb_screencap("S3", timeout=1)

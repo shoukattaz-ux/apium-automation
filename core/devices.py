@@ -81,6 +81,31 @@ def run_adb(*args: str, serial: str | None = None, timeout: float = ADB_TIMEOUT_
     return result.stdout
 
 
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+SCREENCAP_TIMEOUT_SECONDS = 15
+
+
+def adb_screencap(serial: str, timeout: float = SCREENCAP_TIMEOUT_SECONDS) -> bytes:
+    """A PNG screenshot straight from Android's screencap over adb.
+
+    Much faster than asking Appium's helper app on the phone, which is very slow or hangs
+    on some phones (seen on Infinix/Tecno). ``exec-out`` keeps the bytes binary-safe.
+    Raises DeviceError if adb fails or doesn't return a PNG.
+    """
+    command = [adb_path(), "-s", serial, "exec-out", "screencap", "-p"]
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=timeout, creationflags=_NO_WINDOW)
+    except FileNotFoundError as exc:
+        raise DeviceError("adb was not found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DeviceError(f"adb screencap timed out after {timeout:g}s") from exc
+    data = result.stdout
+    if result.returncode != 0 or not data.startswith(PNG_SIGNATURE):
+        detail = (result.stderr or b"").decode("utf-8", "replace").strip() or "no PNG returned"
+        raise DeviceError(f"adb screencap failed: {detail}")
+    return data
+
+
 def parse_adb_devices(output: str) -> tuple[list[str], dict[str, str]]:
     """Split ``adb devices`` output into (ready serials, {serial: problem state})."""
     ready: list[str] = []
@@ -414,6 +439,17 @@ class DeviceSession:
         self.press_key("back")
 
     def screenshot_png(self) -> bytes:
+        """The screen as PNG: via adb's screencap (fast), else through Appium."""
+        if not getattr(self, "_screencap_broken", False):
+            started = time.monotonic()
+            try:
+                png = adb_screencap(self.serial)
+                log.debug("Screenshot of %s via adb in %.1fs", self.serial, time.monotonic() - started)
+                return png
+            except DeviceError as exc:
+                # Don't retry adb on every screenshot of this phone if it can't do it.
+                self._screencap_broken = True
+                log.warning("adb screencap on %s didn't work (%s); using Appium's screenshot", self.serial, exc)
         return self._require_driver().get_screenshot_as_png()
 
     def screenshot(self, path: str) -> None:
