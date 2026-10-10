@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import TYPE_CHECKING, Callable
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
@@ -41,6 +42,7 @@ ATTRIBUTES = ("text", "resource-id", "content-desc", "class", "package", "clicka
 
 class _Signals(QObject):
     loaded = Signal(bytes, str, str)   # png, page source, error
+    stage = Signal(str)                # what the background read is doing now
     clicked = Signal(str)              # error ('' on success)
 
 
@@ -139,6 +141,12 @@ class InspectorWindow(QWidget):
         self.signals = _Signals(self)  # parented: dropped with the window if a worker finishes late
         self.signals.loaded.connect(self._show_screen)
         self.signals.clicked.connect(self._after_record_click)
+        self.signals.stage.connect(self._set_stage)
+        self._stage = ""
+        self._stage_started = 0.0
+        self._stage_timer = QTimer(self)
+        self._stage_timer.setInterval(1000)
+        self._stage_timer.timeout.connect(self._show_stage)
 
         # ---- top bar
         self.device_combo = QComboBox()
@@ -164,6 +172,8 @@ class InspectorWindow(QWidget):
         role_label.setVisible(add_steps is not None)
         self.role_combo.setVisible(add_steps is not None)
         self.status = QLabel("")
+        self.status.setWordWrap(True)
+        self.status.setMaximumWidth(560)
         self.status.setObjectName("Muted")
 
         top = QHBoxLayout()
@@ -264,15 +274,26 @@ class InspectorWindow(QWidget):
             self.status.setText("This phone is running a script — stop it to inspect.")
             return
         self._busy = True
-        self.status.setText("Reading screen…")
         manager = self.dashboard.manager
+        name = self.device_combo.currentText().split(" (")[0]
+        self._set_stage("Reading screen")
+        self._stage_timer.start()
 
         def work() -> None:
             for attempt in (1, 2):
                 try:
+                    started = time.monotonic()
+                    if not manager.has_session(serial):
+                        safe_emit(self.signals.stage, f"connect:Connecting to {name}")
                     session = manager.session_for(serial)
+                    connected = time.monotonic()
+                    safe_emit(self.signals.stage, "Taking a screenshot")
                     png = session.screenshot_png()
+                    shot = time.monotonic()
+                    safe_emit(self.signals.stage, "Reading the screen layout")
                     source = session.page_source()
+                    log.info("Picker read %s: connect %.1fs, screenshot %.1fs, layout %.1fs", serial,
+                             connected - started, shot - connected, time.monotonic() - shot)
                     safe_emit(self.signals.loaded, png, source, "")
                     return
                 except Exception as exc:  # DeviceError or a WebDriver error
@@ -291,8 +312,28 @@ class InspectorWindow(QWidget):
 
         threading.Thread(target=work, name="inspector", daemon=True).start()
 
+    # Slow phones (and the first connection, which installs Appium's helper app) can take a
+    # while: show what is happening and for how long, instead of a frozen "Reading screen…".
+    CONNECT_HINT_AFTER = 8
+
+    def _set_stage(self, stage: str) -> None:
+        self._stage = stage
+        self._stage_started = time.monotonic()
+        self._show_stage()
+
+    def _show_stage(self) -> None:
+        connecting = self._stage.startswith("connect:")
+        text = self._stage.removeprefix("connect:")
+        elapsed = time.monotonic() - self._stage_started
+        message = f"{text}… {elapsed:.0f}s"
+        if connecting and elapsed >= self.CONNECT_HINT_AFTER:
+            message += (" — the first connection to a phone installs Appium's helper app (up to a minute). "
+                        "Unlock the phone and allow any “Install via USB” prompt.")
+        self.status.setText(message)
+
     def _show_screen(self, png: bytes, source: str, error: str) -> None:
         self._busy = False
+        self._stage_timer.stop()
         if error:
             self.status.setText(f"✖ {error}")
             return

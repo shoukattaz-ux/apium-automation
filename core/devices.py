@@ -221,12 +221,37 @@ class DeviceSession:
         options.no_reset = True
         options.new_command_timeout = 600
         options.system_port = self.system_port
+        # Speed: animations off while connected (Appium restores them afterwards)...
+        options.set_capability("appium:disableWindowAnimation", True)
+        # ...and the first connection to a phone installs Appium's helper apps, which is slow
+        # on budget phones or waits on an "install via USB" prompt: allow it time.
+        options.set_capability("appium:uiautomator2ServerInstallTimeout", 120_000)
+        options.set_capability("appium:uiautomator2ServerLaunchTimeout", 120_000)
+        options.set_capability("appium:adbExecTimeout", 60_000)
+        # Some brands (Infinix, Tecno, Xiaomi...) block the hidden-API setting Appium tries to
+        # change; without this the session fails on them.
+        options.set_capability("appium:ignoreHiddenApiPolicyError", True)
+        started = time.monotonic()
         try:
             with self._lock:
                 self.driver = webdriver.Remote(self.appium_url, options=options)
         except Exception as exc:  # urllib3/selenium raise many different types here
             self.driver = None
             raise DeviceError(f"Could not start Appium session for {self.serial}: {_short_error(exc)}") from exc
+        log.info("Appium session for %s ready in %.1fs", self.serial, time.monotonic() - started)
+        self._tune()
+
+    # By default UiAutomator waits up to 10 s for the app to go "idle" before every screenshot,
+    # layout read or search. Apps with videos or animations (feeds) never go idle, so each read
+    # cost the full 10 s. A short wait keeps reads fast; scripts already wait for elements to
+    # hold still themselves.
+    IDLE_TIMEOUT_MS = 200
+
+    def _tune(self) -> None:
+        try:
+            self.driver.update_settings({"waitForIdleTimeout": self.IDLE_TIMEOUT_MS})
+        except Exception as exc:  # an older driver without the setting: keep its default
+            log.warning("Could not shorten the idle wait on %s: %s", self.serial, _short_error(exc))
 
     @property
     def is_connected(self) -> bool:

@@ -15,6 +15,9 @@ Got a folder instead? Keep the whole folder together and run DeviceAutomation.ex
    - Settings > About phone > tap "Build number" 7 times (enables Developer options)
    - Settings > System > Developer options > turn on "USB debugging"
    - Xiaomi/Redmi: also turn on "USB debugging (Security settings)"
+   - Infinix/Tecno/itel: also turn on "Install via USB" and turn off
+     "Verify apps over USB" (Developer options). The first connection installs
+     Appium's helper app; allow any install prompt on the phone.
 
 3. Plug in the phone(s) with a USB data cable
    - Unlock the phone and tap "Allow" on the "Allow USB debugging?" prompt

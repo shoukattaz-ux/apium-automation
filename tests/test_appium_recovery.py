@@ -117,3 +117,56 @@ def test_picker_reconnects_after_a_lost_session(app, window_factory, monkeypatch
     picker = inspector_module.InspectorWindow(window, on_pick=lambda capture: None, serial="A1")
     assert wait_for(app, lambda: "isn't running" in picker.status.text())
     picker.close()
+
+
+# ------------------------------------------------------------------ speed
+
+def test_session_is_tuned_for_fast_reads(monkeypatch):
+    """Animations off, generous first-install timeouts, and no 10 s wait for an 'idle' app."""
+    from appium import webdriver
+
+    from core.devices import DeviceSession
+
+    created = {}
+
+    class Driver:
+        def __init__(self, url, options):
+            created["caps"] = options.to_capabilities()
+            created["settings"] = []
+
+        def update_settings(self, settings):
+            created["settings"].append(settings)
+
+    monkeypatch.setattr(webdriver, "Remote", Driver)
+    DeviceSession("S1")
+    caps = created["caps"]
+    assert caps["appium:disableWindowAnimation"] is True and caps["appium:ignoreHiddenApiPolicyError"] is True
+    assert caps["appium:uiautomator2ServerInstallTimeout"] >= 60_000
+    assert created["settings"] == [{"waitForIdleTimeout": DeviceSession.IDLE_TIMEOUT_MS}]
+    assert DeviceSession.IDLE_TIMEOUT_MS <= 500
+
+
+def test_picker_shows_what_it_is_waiting_for(app, window_factory, monkeypatch):
+    import threading
+
+    import ui.inspector as inspector_module
+
+    release = threading.Event()
+
+    def slow_factory(serial, url):
+        release.wait(5)  # e.g. the first connection installing Appium's helper app
+        return FakeSession(serial)
+
+    window = window_factory({"A1": FakeSession("A1")})
+    window.manager._session_factory = slow_factory
+    monkeypatch.setattr(inspector_module.InspectorWindow, "CONNECT_HINT_AFTER", 0)
+    try:
+        picker = inspector_module.InspectorWindow(window, on_pick=lambda capture: None, serial="A1")
+        assert wait_for(app, lambda: "Connecting to Phone A1" in picker.status.text())
+        assert "Install via USB" in picker.status.text()
+        release.set()
+        assert wait_for(app, lambda: bool(picker.elements))
+        assert not picker._stage_timer.isActive()
+        picker.close()
+    finally:
+        release.set()

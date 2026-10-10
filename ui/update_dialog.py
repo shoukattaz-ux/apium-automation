@@ -52,7 +52,8 @@ class UpdateDialog(QDialog):
         title.setWordWrap(True)
         self.notes = QTextBrowser()
         self.notes.setOpenExternalLinks(True)
-        self.notes.setMarkdown(release.notes.strip() or "_No release notes._")
+        self.notes.setMarkdown(release.notes.strip() or
+                               f"Release notes: [{release.page_url}]({release.page_url})")
         self.progress = QProgressBar()
         self.progress.hide()
         self.status = QLabel("")

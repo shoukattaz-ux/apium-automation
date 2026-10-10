@@ -19,13 +19,31 @@ INSTALLER = b"MZ fake installer " * 1000
 def github(monkeypatch):
     """A local server playing GitHub: /latest (API) and the two release assets."""
     state = {"tag": "v1.2.57", "installer": INSTALLER, "checksum": hashlib.sha256(INSTALLER).hexdigest(),
-             "status": 200, "hits": []}
+             "status": 200, "hits": [], "manifest": False, "manifest_status": 200}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             state["hits"].append(self.path)
             base = f"http://127.0.0.1:{server.server_port}"
-            if self.path == "/latest":
+            version = state["tag"].lstrip("v")
+            if self.path == "/download/latest.json":
+                if not state["manifest"] or state["manifest_status"] != 200:
+                    self.send_response(404 if not state["manifest"] else state["manifest_status"])
+                    self.end_headers()
+                    return
+                body = json.dumps({"version": version, "installer": "DeviceAutomation-Setup.exe",
+                                   "size": len(state["installer"])}).encode()
+            elif self.path == f"/download/v{version}/DeviceAutomation-Setup.exe":
+                body = state["installer"]
+            elif self.path == f"/download/v{version}/DeviceAutomation-Setup.exe.sha256":
+                body = f"{state['checksum']}  DeviceAutomation-Setup.exe\n".encode()
+            elif self.path == f"/notes/v{version}":
+                if state["status"] != 200:
+                    self.send_response(state["status"])
+                    self.end_headers()
+                    return
+                body = json.dumps({"body": "## Faster\n- reads"}).encode()
+            elif self.path == "/latest":
                 if state["status"] != 200:
                     self.send_response(state["status"])
                     self.end_headers()
@@ -54,7 +72,12 @@ def github(monkeypatch):
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    monkeypatch.setattr(updater, "API_URL", f"http://127.0.0.1:{server.server_port}/latest")
+    base = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setattr(updater, "API_URL", base + "/latest")
+    monkeypatch.setattr(updater, "MANIFEST_URL", base + "/download/latest.json")
+    monkeypatch.setattr(updater, "DOWNLOAD_URL", base + "/download/v{version}/{asset}")
+    monkeypatch.setattr(updater, "PAGE_URL", base + "/tag/v{version}")
+    monkeypatch.setattr(updater, "NOTES_URL", base + "/notes/v{version}")
     monkeypatch.setattr(updater, "APP_VERSION", "1.2.5")
     yield state
     server.shutdown()
@@ -149,3 +172,20 @@ def test_update_dialog_and_check_results(github, monkeypatch, tmp_path):
     ready = update_dialog.UpdateDialog(None, release, quit_app=lambda: quit_called.append(1))
     ready._downloaded(str(tmp_path / "setup.exe"), "")
     assert started == [str(tmp_path / "setup.exe")] and quit_called == [1]
+
+
+def test_check_uses_the_release_manifest_and_survives_api_rate_limits(github, tmp_path):
+    github["manifest"] = True
+    release = updater.check()
+    assert release.version == "1.2.57" and release.installer_url.endswith("/download/v1.2.57/DeviceAutomation-Setup.exe")
+    assert "/latest" not in github["hits"]          # the rate-limited API isn't needed
+    assert "Faster" in release.notes                 # notes still shown when the API answers
+    assert updater.download(release, tmp_path).read_bytes() == INSTALLER
+
+    github["status"] = 403                           # API rate limited: notes are optional
+    release = updater.check()
+    assert release.version == "1.2.57" and release.notes == ""
+
+    github["manifest"] = False                       # an old release without latest.json, API limited
+    with pytest.raises(updater.UpdateError, match="limiting update checks"):
+        updater.check()
