@@ -169,6 +169,12 @@ class DeviceManager:
             self._sessions[serial] = session
         return session
 
+    def has_session(self, serial: str) -> bool:
+        """True if ``serial`` already has an open session (so using it won't need to connect)."""
+        with self._lock:
+            session = self._sessions.get(serial)
+        return bool(session and session.is_connected)
+
     def drop_session(self, serial: str) -> None:
         with self._lock:
             session = self._sessions.pop(serial, None)
