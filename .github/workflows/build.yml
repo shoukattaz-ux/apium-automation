@@ -192,6 +192,10 @@ jobs:
           mv DeviceAutomation-Setup-*.exe DeviceAutomation-Setup.exe
           sha256sum DeviceAutomation-Setup.exe > DeviceAutomation-Setup.exe.sha256
           cat DeviceAutomation-Setup.exe.sha256
+          # What installed apps read to find updates: a release download, which (unlike the API)
+          # isn't rate limited.
+          python3 -c "import json, os; print(json.dumps({'version': '${{ needs.windows.outputs.version }}', 'installer': 'DeviceAutomation-Setup.exe', 'size': os.path.getsize('DeviceAutomation-Setup.exe')}))" > latest.json
+          cat latest.json
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.windows.outputs.version }}
@@ -200,5 +204,6 @@ jobs:
           files: |
             artifacts/DeviceAutomation-Setup.exe
             artifacts/DeviceAutomation-Setup.exe.sha256
+            artifacts/latest.json
           generate_release_notes: true
           make_latest: true

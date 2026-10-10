@@ -30,7 +30,13 @@ from .version import APP_VERSION, INSTALLER_ASSET, UPDATE_REPO
 
 log = logging.getLogger(__name__)
 
-API_URL = "https://api.github.com/repos/{repo}/releases/latest"
+# Every release carries latest.json; release downloads aren't rate limited, unlike GitHub's API
+# (60 unauthenticated requests an hour per internet connection, often shared by many people).
+MANIFEST_URL = "https://github.com/{repo}/releases/latest/download/latest.json"
+DOWNLOAD_URL = "https://github.com/{repo}/releases/download/v{version}/{asset}"
+PAGE_URL = "https://github.com/{repo}/releases/tag/v{version}"
+API_URL = "https://api.github.com/repos/{repo}/releases/latest"       # releases made before latest.json
+NOTES_URL = "https://api.github.com/repos/{repo}/releases/tags/v{version}"  # release notes (optional)
 TIMEOUT_SECONDS = 15
 CHUNK = 256 * 1024
 
@@ -79,15 +85,55 @@ def parse_release(data: dict) -> Release | None:
                    checksum_url=checksum["browser_download_url"], size=int(installer.get("size") or 0))
 
 
+def _get_json(url: str, accept: str = "application/json") -> dict:
+    with _open(url, accept=accept) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _http_problem(exc: urllib.error.HTTPError) -> UpdateError:
+    if exc.code in (403, 429):
+        return UpdateError("GitHub is limiting update checks from your internet connection right now. "
+                           "Try again in an hour, or download the newest version from the Releases page.")
+    return UpdateError(f"GitHub answered {exc.code} when checking for updates")
+
+
+def release_notes(repo: str, version: str) -> str:
+    """The release's notes, if GitHub's API answers (it is rate limited, so this is best effort)."""
+    try:
+        return str(_get_json(NOTES_URL.format(repo=repo, version=version),
+                             accept="application/vnd.github+json").get("body") or "")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return ""
+
+
 def latest_release(repo: str = UPDATE_REPO) -> Release | None:
     """The newest published release, or None if there is none with an installer yet."""
     try:
-        with _open(API_URL.format(repo=repo), accept="application/vnd.github+json") as response:
-            data = json.loads(response.read().decode("utf-8"))
+        manifest = _get_json(MANIFEST_URL.format(repo=repo))
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise _http_problem(exc) from exc
+        manifest = None  # a release from before latest.json existed: ask the API
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise UpdateError(f"Could not reach GitHub to check for updates ({exc})") from exc
+    except ValueError as exc:
+        raise UpdateError("GitHub sent an unreadable answer") from exc
+    if manifest:
+        version = str(manifest.get("version") or "").lstrip("v")
+        if not parse_version(version):
+            raise UpdateError("The latest release's latest.json has no valid version")
+        asset = str(manifest.get("installer") or INSTALLER_ASSET)
+        return Release(version=version, notes=release_notes(repo, version),
+                       page_url=PAGE_URL.format(repo=repo, version=version),
+                       installer_url=DOWNLOAD_URL.format(repo=repo, version=version, asset=asset),
+                       checksum_url=DOWNLOAD_URL.format(repo=repo, version=version, asset=asset + ".sha256"),
+                       size=int(manifest.get("size") or 0))
+    try:
+        data = _get_json(API_URL.format(repo=repo), accept="application/vnd.github+json")
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None  # no release yet (or the repository was made private)
-        raise UpdateError(f"GitHub answered {exc.code} when checking for updates") from exc
+        raise _http_problem(exc) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise UpdateError(f"Could not reach GitHub to check for updates ({exc})") from exc
     except ValueError as exc:
