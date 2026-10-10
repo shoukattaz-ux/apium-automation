@@ -167,7 +167,7 @@ class DeviceRow(QFrame):
 
 class MainWindow(QMainWindow):
     def __init__(self, manager: DeviceManager | None = None, scan_devices: bool = True,
-                 schedules: ScheduleStore | None = None):
+                 schedules: ScheduleStore | None = None, appium_watchdog=None):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         if paths.icon_path().exists():
@@ -195,6 +195,8 @@ class MainWindow(QMainWindow):
         self._last_scan_error = ""
         self.scans_completed = 0
         self._windows: list[QWidget] = []
+        self.appium_watchdog = appium_watchdog  # restarts Appium if it stops (None: just report it)
+        self._appium_up: bool | None = None
         self.wireless = WirelessStore()
         self.reconnector = AutoReconnector(self.wireless)
 
@@ -812,9 +814,27 @@ class MainWindow(QMainWindow):
                          daemon=True).start()
 
     def _apply_appium_state(self, running: bool) -> None:
+        was_up, self._appium_up = self._appium_up, running
         if running:
             self.appium_label.setText(f"●  Appium running at {self.manager.appium_url}")
             self.appium_label.setStyleSheet("color: #22c55e;")
+            if was_up is False:
+                log.info("Appium server is answering again")
+            return
+        if was_up:
+            # Sessions on a stopped server are dead: forget them so the next use reconnects.
+            log.warning("Appium server stopped answering at %s", self.manager.appium_url)
+            self.manager.drop_all_sessions()
+        watchdog = self.appium_watchdog
+        if watchdog is not None and watchdog.can_restart():
+            self.appium_label.setText("●  Appium stopped — restarting it…")
+            self.appium_label.setStyleSheet("color: #f59e0b;")
+            if watchdog.due():
+                def restart() -> None:
+                    watchdog.restart()
+                    safe_emit(self.bridge.appium_checked, is_server_running(self.manager.appium_url))
+
+                threading.Thread(target=restart, name="appium-restart", daemon=True).start()
         else:
             self.appium_label.setText("●  Appium not running")
             self.appium_label.setStyleSheet("color: #ef4444;")
