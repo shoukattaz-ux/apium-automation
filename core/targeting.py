@@ -29,6 +29,8 @@ SIZE_TOLERANCE = 0.5        # a match may be 50%..200% of the picked element's w
 NEAR = 0.08                 # centre distance (fraction of the screen diagonal) that counts as "same place"
 FAR_APART = 0.15            # ...and the gap to the runner-up needed to break a tie by position
 MAX_ANCHORS = 3
+LARGE_FRACTION = 0.4        # an element covering more of the screen than this is a container, not a target
+LOOK_ALIKE_SIZE = 0.15      # look-alikes: same type/text/id and within 15% of the size
 
 
 def parse_bounds(value: Any) -> tuple[int, int, int, int] | None:
@@ -116,6 +118,28 @@ def screen_signature(element: UiElement, elements: list[UiElement]) -> dict:
 
 def _contains(outer: tuple[int, int, int, int], inner: tuple[int, int, int, int]) -> bool:
     return outer[0] <= inner[0] and outer[1] <= inner[1] and inner[2] <= outer[2] and inner[3] <= outer[3]
+
+
+def screen_fraction(bounds: tuple[int, int, int, int] | None, screen: tuple[int, int] | None) -> float:
+    """How much of the screen an element covers (0..1; 0 when unknown)."""
+    if not bounds or not screen or not screen[0] or not screen[1]:
+        return 0.0
+    return max(0, bounds[2] - bounds[0]) * max(0, bounds[3] - bounds[1]) / (screen[0] * screen[1])
+
+
+def look_alikes(element: UiElement, elements: list[UiElement]) -> list[UiElement]:
+    """Other elements a locator can't tell apart from ``element``: same type, id, text and
+    description, about the same size (e.g. 50 cloned app icons all named "DualSpace")."""
+    width, height = element.bounds[2] - element.bounds[0], element.bounds[3] - element.bounds[1]
+
+    def similar(other: UiElement) -> bool:
+        w, h = other.bounds[2] - other.bounds[0], other.bounds[3] - other.bounds[1]
+        return (other is not element and other.class_name == element.class_name
+                and other.text == element.text and other.content_desc == element.content_desc
+                and other.resource_id == element.resource_id
+                and abs(w - width) <= width * LOOK_ALIKE_SIZE and abs(h - height) <= height * LOOK_ALIKE_SIZE)
+
+    return [other for other in elements if similar(other)]
 
 
 def describe_target(target: dict) -> str:

@@ -120,12 +120,20 @@ def element_at(elements: list[UiElement], x: float, y: float) -> UiElement | Non
     return min(hits, key=lambda e: (e.area, -e.depth))
 
 
+# A clickable parent is only "the button around this label" if it isn't much bigger. Some
+# launchers mark only a whole page of icons clickable; jumping to that would make the step
+# tap the page's centre, i.e. a different app.
+MAX_PARENT_GROWTH = 4.0
+
+
 def clickable_target(element: UiElement, elements: list[UiElement]) -> UiElement:
-    """For a non-clickable label inside a button, return the clickable ancestor if there is one."""
+    """For a non-clickable label inside a button, return the button (its nearest clickable
+    ancestor of similar size); otherwise the element itself."""
     if element.clickable:
         return element
     containing = [e for e in elements if e.clickable and e.depth < element.depth
-                  and _inside(element.bounds, e.bounds)]
+                  and _inside(element.bounds, e.bounds)
+                  and e.area <= max(element.area, 1) * MAX_PARENT_GROWTH]
     return max(containing, key=lambda e: e.depth) if containing else element
 
 

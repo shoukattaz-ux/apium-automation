@@ -45,6 +45,7 @@ from typing import Any, Iterator
 
 LOCATOR_TYPES = ["id", "xpath", "accessibility id", "text", "class name", "android uiautomator", "image"]
 MAX_AGREE = 10
+_OMIT_DEFAULTS = {"scroll_search", "allow_large"}
 DIRECTIONS = ["up", "down", "left", "right"]
 KEYS = ["back", "home", "enter", "recent_apps", "delete", "search", "menu", "volume_up", "volume_down"]
 ON_FAIL = ["skip", "stop"]
@@ -83,6 +84,9 @@ def _locator(help_text: str = "e.g. com.example.app:id/button, an XPath, or the 
     return (
         FieldSpec("locator_type", "Find element by", "locator_type", default="id", choices=tuple(LOCATOR_TYPES)),
         FieldSpec("locator_value", "Locator value", "text", help=help_text, templated=True),
+        FieldSpec("scroll_search", "If not on screen, scroll and look again", "int", required=False, default=0,
+                  minimum=0, maximum=50,
+                  help="How many times to scroll down looking for it (e.g. an app further down a long list)"),
     )
 
 
@@ -113,6 +117,9 @@ ACTIONS: dict[str, ActionSpec] = {
                       help="Backup position (percent of screen) tapped when the element isn't found. "
                            "Filled in by the Element Picker; clear both to turn off."),
             FieldSpec("fallback_y", "If not found, tap at Y %", "float", required=False, minimum=0, maximum=100),
+            FieldSpec("allow_large", "Allow tapping a large area", "bool", required=False, default=False,
+                      help="A click taps the element's centre. On an element covering much of the screen (a whole "
+                           "page or list) that is usually something else, so it is refused unless ticked."),
         ), group="Elements", description="Tap a button, field or item"),
         ActionSpec("wait_for_element", "Wait For Element", _locator() + (_timeout(required=True),),
                    group="Elements", description="Wait until something appears on screen"),
@@ -302,6 +309,10 @@ def validate_step(step: dict) -> dict[str, str]:
             if spec.required:
                 errors[spec.name] = f"{spec.label} is required"
             continue
+        if spec.kind == "bool":
+            if not isinstance(value, bool):
+                errors[spec.name] = f"{spec.label} must be true or false"
+            continue
         if spec.kind in ("int", "float"):
             if isinstance(value, bool):
                 errors[spec.name] = f"{spec.label} must be a number"
@@ -426,8 +437,8 @@ def normalize_step(step: dict) -> dict:
             value = int(number) if number.is_integer() else number
         elif isinstance(value, str):
             value = value.strip()
-        if spec in COMMON_FIELDS and value == spec.default:
-            continue  # keep saved files short: retries 0 / on_fail skip are implied
+        if (spec in COMMON_FIELDS or spec.name in _OMIT_DEFAULTS) and value == spec.default:
+            continue  # keep saved files short: retries 0 / on_fail skip / no scrolling are implied
         clean[spec.name] = value
     if action in LOCATOR_ACTIONS and isinstance(step.get("alternatives"), list):
         alternatives = [{"locator_type": a["locator_type"], "locator_value": str(a["locator_value"]).strip()}

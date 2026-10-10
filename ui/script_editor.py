@@ -492,6 +492,10 @@ class StepDialog(QDialog):
         form.addRow(spec.label + ("" if spec.required else " (optional)"), container)
 
     def _make_input(self, spec: FieldSpec, value: Any) -> QWidget:
+        if spec.kind == "bool":
+            box = QCheckBox()
+            box.setChecked(bool(value))
+            return box
         if spec.kind in ("choice", "locator_type"):
             combo = QComboBox()
             combo.addItems(list(spec.choices))
@@ -536,6 +540,8 @@ class StepDialog(QDialog):
         return line
 
     def _value(self, widget: QWidget) -> Any:
+        if isinstance(widget, QCheckBox):
+            return widget.isChecked()
         if isinstance(widget, QComboBox):
             return widget.currentText().strip()
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
