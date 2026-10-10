@@ -48,6 +48,9 @@ class FakeSession(DeviceSession):
         self.screen = dict(screen or {})
         self.calls = []
         self.fail_times = dict(fail_times or {})  # locator -> failures before success
+        self.attrs = {}    # locator -> attributes of the element it matches (class, text, bounds...)
+        self.matches = {}  # locator -> list of attribute dicts, when it matches several elements
+        self.package = "com.fake"
 
     def _element(self, locator_type, locator_value):
         self._require_driver()
@@ -119,7 +122,35 @@ class FakeSession(DeviceSession):
         return PAGE_SOURCE
 
     def current_package(self):
-        return "com.fake"
+        return self.package
+
+    # verified targeting: elements come from ``screen`` / ``attrs`` / ``matches``
+    def candidates(self, locator_type, locator_value):
+        from core.targeting import Candidate
+
+        try:
+            key = self._element(locator_type, locator_value)
+        except ElementNotFound:
+            return []
+        if key in self.matches:
+            return [Candidate((key, i), dict(a)) for i, a in enumerate(self.matches[key])]
+        return [Candidate(key, dict(self.attrs.get(key, {})))]
+
+    def bounds_of(self, candidate):
+        return candidate.attrs.get("bounds", "")
+
+    def click_candidate(self, candidate):
+        handle = candidate.handle
+        self.calls.append(("click", *handle) if isinstance(handle, tuple) else ("click", handle))
+
+    def text_of(self, candidate):
+        key = candidate.handle[0] if isinstance(candidate.handle, tuple) else candidate.handle
+        return self.screen[key]
+
+    def type_into(self, candidate, text):
+        key = candidate.handle[0] if isinstance(candidate.handle, tuple) else candidate.handle
+        self.screen[key] = text
+        self.calls.append(("paste", key, text))
 
 
 class BrokenSession(FakeSession):

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from core import paths
 from core.devices import DeviceError
 from core.inspector import UiElement, clickable_target, element_at, parse_page_source, suggest_locators
+from core.targeting import fingerprint, screen_signature
 
 from .qtutil import safe_emit
 from .theme import ACCENT
@@ -368,6 +369,7 @@ class InspectorWindow(QWidget):
             step["alternatives"] = [{"locator_type": t, "locator_value": v} for t, v in backups]
         if action == "click":
             step.update(self._fallback_position())
+        step.update(self._safety_checks())
         if action == "copy_text":
             step["save_as"] = "copied_value"
         elif action == "paste_text":
@@ -383,6 +385,13 @@ class InspectorWindow(QWidget):
             for child in step.get("then", []):
                 child["device"] = self._role()
         return step
+
+    def _safety_checks(self) -> dict:
+        """Fingerprint of the selected element and the screen it's on, checked before acting at run time."""
+        if self.selected is None or not self.elements:
+            return {}
+        return {"target": fingerprint(self.selected, self.elements),
+                "screen": screen_signature(self.selected, self.elements)}
 
     def _fallback_position(self) -> dict:
         """The selected element's centre as percent of the screen, as a Click step's backup tap."""
@@ -407,7 +416,9 @@ class InspectorWindow(QWidget):
         locators = self.ranked_locators()
         if locators and self.on_pick:
             position = self._fallback_position()
-            self.on_pick(locators, (position["fallback_x"], position["fallback_y"]) if position else None)
+            self.on_pick({"locators": locators,
+                          "position": (position["fallback_x"], position["fallback_y"]) if position else None,
+                          **self._safety_checks()})
             self.close()
 
     def _copy_locator(self) -> None:

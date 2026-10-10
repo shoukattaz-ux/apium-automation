@@ -61,6 +61,7 @@ others.
 | `core/runner.py` | `ScriptRunner` (blocks, retries, on-fail, roles, variables, reports), `run_repeatedly`, `run_script_on_devices`. |
 | `core/manager.py` | Session and run management: one run per phone, workflows reserve all their phones, repeats, finish hooks. |
 | `core/history.py` | Run recorder, JSON/HTML reports, failure screenshots, CSV export. |
+| `core/targeting.py` | Safety checks: element fingerprint, screen signature, rejecting wrong or ambiguous matches. |
 | `core/inspector.py` | Parses the screen hierarchy, finds the element under a point, ranks locators. |
 | `core/scheduler.py` | Daily / interval schedules stored in `configs/schedules.json`. |
 | `core/wireless.py`, `ui/wireless_dialog.py` | Wi-Fi connections: switch to Wi-Fi, pair, connect, saved phones and auto-reconnect. |
@@ -143,6 +144,17 @@ Steps that find an element (`click`, `wait_for_element`, `copy_text`,
 `[{"locator_type": "xpath", "locator_value": "//*[@content-desc=\"Video\"]/.."}]`.
 All of them are checked about twice a second until the timeout and the first
 one in the list that matches is used. "Pick from screen…" fills them in.
+
+When an element is picked, the step also records **safety checks**: a
+fingerprint of the element (`target`: class, id, text, description, size,
+position) and the screen it was on (`screen`: app package plus landmarks such
+as tab or title bars). At run time a locator's match only counts if it fits
+the fingerprint (otherwise the next locator is tried; look-alikes that can't be
+told apart are skipped rather than guessed), the step waits for the recorded
+screen, and an element is only tapped once it is on screen and has stopped
+moving. The backup tap position is only used if the picked element is still
+under it. Either check can be turned off per step (`"verify": false`,
+`"check_screen": false`). Logic: `core/targeting.py`.
 
 Locator types: `id`, `xpath`, `accessibility id`, `text` (exact visible text),
 `class name`, `android uiautomator`. All device steps also accept `device`

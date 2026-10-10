@@ -304,34 +304,6 @@ class DeviceSession:
         except ElementNotFound:
             return False
 
-    def first_present(self, locators: list[tuple[str, str]], timeout_seconds: float = 15) -> int | None:
-        """Index of the first of ``locators`` that matches an element, or None after the timeout.
-
-        All locators are checked on every pass (about twice a second), in order, so a
-        backup locator is found as soon as it matches instead of after the earlier
-        ones each use up a full timeout. A malformed locator is reported and skipped.
-        """
-        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
-        usable = list(range(len(locators)))
-        while True:
-            for index in list(usable):
-                if self.should_stop():
-                    raise RunStopped()
-                locator_type, locator_value = locators[index]
-                try:
-                    if self.exists(locator_type, locator_value, timeout_seconds=0):
-                        return index
-                except ElementNotFound:
-                    pass
-                except Exception as exc:  # invalid selector: no point asking again
-                    if "invalid" not in str(exc).lower() and not isinstance(exc, ValueError):
-                        raise
-                    log.warning("Locator %s=%s is invalid: %s", locator_type, locator_value, _short_error(exc))
-                    usable.remove(index)
-            if not usable or time.monotonic() >= deadline:
-                return None
-            time.sleep(0.5)
-
     def close_app(self, package: str) -> None:
         """Force-stop an app."""
         try:
@@ -395,6 +367,61 @@ class DeviceSession:
     def page_source(self) -> str:
         """The current screen's UI hierarchy as XML (used by the element picker)."""
         return self._require_driver().page_source
+
+    # ------------------------------------------------------- verified targeting
+    # Used by JSON steps: list *every* element a locator matches with its details, so
+    # the runner can check each against the picked element before acting on one.
+
+    CANDIDATE_ATTRS = ("class", "resource-id", "text", "content-desc", "bounds", "displayed")
+    MAX_CANDIDATES = 6
+
+    def candidates(self, locator_type: str, locator_value: str) -> list:
+        """All elements ``locator`` matches right now (no waiting), with their attributes."""
+        from .targeting import Candidate
+
+        by, value = to_appium_locator(locator_type, locator_value)
+        found = self._require_driver().find_elements(by, value)
+        result = []
+        for element in found[:self.MAX_CANDIDATES]:
+            attrs = {}
+            for name in self.CANDIDATE_ATTRS:
+                try:
+                    attrs[name] = element.get_attribute(name) or ""
+                except Exception as exc:  # stale element: it vanished between find and read
+                    if "stale" in str(exc).lower():
+                        break
+                    raise
+            else:
+                if attrs.get("displayed") != "false":
+                    result.append(Candidate(element, attrs))
+        return result
+
+    def bounds_of(self, candidate) -> str:
+        """Fresh bounds of a matched element ('' if it's gone), to see whether it is still moving."""
+        try:
+            return candidate.handle.get_attribute("bounds") or ""
+        except Exception as exc:
+            if "stale" in str(exc).lower():
+                return ""
+            raise
+
+    def click_candidate(self, candidate) -> None:
+        candidate.handle.click()
+
+    def text_of(self, candidate) -> str:
+        element = candidate.handle
+        text = element.text or element.get_attribute("text") or element.get_attribute("content-desc") or ""
+        try:
+            self.driver.set_clipboard_text(text)
+        except Exception:  # clipboard access is a nice-to-have
+            pass
+        return text
+
+    def type_into(self, candidate, text: str) -> None:
+        element = candidate.handle
+        element.click()
+        element.clear()
+        element.send_keys(text)
 
 
 # Android key codes for press_key / the "Press Key" step.

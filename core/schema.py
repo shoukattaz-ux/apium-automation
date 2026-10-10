@@ -341,6 +341,10 @@ def validate_step(step: dict) -> dict[str, str]:
                 if hint:
                     errors["alternatives"] = f"Backup locator {number}: {hint}"
                     break
+    if action in LOCATOR_ACTIONS:
+        for key in ("target", "screen"):
+            if key in step and not isinstance(step[key], dict):
+                errors[key] = f"{key} must be an object"
     if action == "click" and (step.get("fallback_x") is None) != (step.get("fallback_y") is None):
         errors["fallback_y" if step.get("fallback_y") is None else "fallback_x"] = \
             "Set both X and Y for the backup tap, or neither"
@@ -421,6 +425,14 @@ def normalize_step(step: dict) -> dict:
                         if isinstance(a, dict) and a.get("locator_type") and str(a.get("locator_value", "")).strip()]
         if alternatives:
             clean["alternatives"] = alternatives
+    if action in LOCATOR_ACTIONS:
+        # Safety checks recorded by the element picker (see core/targeting.py).
+        for key in ("target", "screen"):
+            if isinstance(step.get(key), dict) and step[key]:
+                clean[key] = step[key]
+        for key in ("verify", "check_screen"):
+            if step.get(key) is False:
+                clean[key] = False
     for key in ACTIONS[action].blocks:
         children = step.get(key) or []
         if children or key != "else":
@@ -475,6 +487,10 @@ def describe_step(step: dict, with_title: bool = True) -> str:
     else:
         text = f"{label} {target}"
     extras = []
+    checks = [name for key, flag, name in (("target", "verify", "element"), ("screen", "check_screen", "screen"))
+              if step.get(key) and step.get(flag, True)]
+    if checks:
+        extras.append(f"checks {' + '.join(checks)}")
     if step.get("alternatives"):
         count = len(step["alternatives"])
         extras.append(f"+{count} backup locator{'s' if count > 1 else ''}")

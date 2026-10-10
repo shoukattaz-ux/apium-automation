@@ -102,8 +102,8 @@ def test_stop_interrupts_run():
 def test_retries_then_success_and_on_fail_stop(tmp_path):
     session = FakeSession("dev1", {"id=btn": ""}, fail_times={"id=btn": 2})
     script = {"name": "r", "steps": [
-        {"action": "click", "locator_type": "id", "locator_value": "btn", "retries": 2},
-        {"action": "click", "locator_type": "id", "locator_value": "nope", "on_fail": "stop"},
+        {"action": "click", "locator_type": "id", "locator_value": "btn", "retries": 2, "timeout_seconds": 0},
+        {"action": "click", "locator_type": "id", "locator_value": "nope", "on_fail": "stop", "timeout_seconds": 0},
         {"action": "open_app", "package": "never"},
     ]}
     recorder = RunRecorder("r", {"device": "dev1"}, base_dir=tmp_path)

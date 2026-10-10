@@ -218,13 +218,15 @@ def test_inspector_picks_and_records(app, configs, window_factory):
 
     # Picking for the Edit Step dialog: all unique locators (highlighted one first) and the position.
     picked = []
-    picker = window.open_inspector(on_pick=lambda locators, position: picked.append((locators, position)))
+    picker = window.open_inspector(on_pick=picked.append)
     assert picker.isModal()  # otherwise the modal Edit Step dialog blocks it
     assert wait_for(app, lambda: bool(picker.elements))
     picker._click(380, 20)
     picker._use_locator()
     menu_xpath = "/android.widget.FrameLayout/android.widget.ImageButton"
-    locators, position = picked[0]
+    locators, position = picked[0]["locators"], picked[0]["position"]
+    assert picked[0]["target"]["class"] == "android.widget.ImageButton" and picked[0]["target"]["desc"] == "Menu"
+    assert picked[0]["screen"]["anchors"]  # landmarks recorded with the screen
     assert locators[0] == ("accessibility id", "Menu") and locators[-1] == ("xpath", menu_xpath)
     assert {t for t, _ in locators} == {"accessibility id", "android uiautomator", "xpath", "class name"}
     assert position == (92.5, 2.5)
@@ -232,8 +234,11 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     from ui.script_editor import StepDialog
 
     dialog = StepDialog(editor, step={"action": "click", "locator_type": "id", "locator_value": "old"},
-                        pick_locator=lambda apply: apply(*picked[0]))
+                        pick_locator=lambda apply: apply(picked[0]))
+    assert not dialog.verify_box.isEnabled()  # nothing recorded yet
     dialog._pick()
+    assert dialog.verify_box.isEnabled() and dialog.verify_box.isChecked()
+    assert "ImageButton" in dialog.verify_label.text()
     assert dialog.inputs["locator_type"].currentText() == "accessibility id"
     assert dialog.inputs["locator_value"].text() == "Menu"
     backups = [{"locator_type": t, "locator_value": v} for t, v in locators[1:]]
@@ -246,7 +251,10 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     while dialog.alternatives.list.currentRow() > 0:
         dialog.alternatives._move(-1)
     dialog._promote_alternative()  # "text=Menu button" becomes main, Menu goes to the backups
+    dialog.screen_box.setChecked(False)
     dialog._accept()
+    assert dialog.result_step["target"]["desc"] == "Menu" and "verify" not in dialog.result_step
+    assert dialog.result_step["check_screen"] is False and dialog.result_step["screen"]
     assert dialog.result_step["locator_type"] == "text"
     assert dialog.result_step["alternatives"] == [{"locator_type": "accessibility id", "locator_value": "Menu"}] \
         + backups

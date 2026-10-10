@@ -62,9 +62,9 @@ def run(device):
     device.scroll("down", times=2)
 '''
 
-# Opens the element picker; it calls back with the locators (best first) and the
-# element's centre as (x %, y %) or None.
-PickLocator = Callable[[Callable[[list, "tuple[float, float] | None"], None]], None]
+# Opens the element picker; it calls back with what was picked: {"locators": [...] best first,
+# "position": (x %, y %) or None, "target": fingerprint, "screen": screen signature}.
+PickLocator = Callable[[Callable[[dict], None]], None]
 
 
 class LocatorListEditor(QWidget):
@@ -265,6 +265,26 @@ class StepDialog(QDialog):
         self.errors: dict[str, QLabel] = {}
         self.result_step: dict | None = None
         self.alternatives: LocatorListEditor | None = None
+        # Safety checks recorded by the element picker; kept across action changes.
+        self.target: dict | None = (step or {}).get("target") or None
+        self.screen_check: dict | None = (step or {}).get("screen") or None
+        self.verify_box = QCheckBox("Only act on the element I picked")
+        self.verify_box.setToolTip("A locator match only counts if it has the same type, id, text and "
+                                   "size as the element you picked; otherwise the next locator is tried")
+        self.verify_label = QLabel()
+        self.screen_box = QCheckBox("Only on the screen I picked it on")
+        self.screen_box.setToolTip("Waits until this app and one of these landmarks are showing; "
+                                   "otherwise the step fails instead of acting on the wrong screen")
+        self.screen_label = QLabel()
+        for label in (self.verify_label, self.screen_label):
+            label.setObjectName("Muted")
+            label.setWordWrap(True)
+        self.verify_box.setChecked((step or {}).get("verify", True) is not False)
+        self.screen_box.setChecked((step or {}).get("check_screen", True) is not False)
+        self.safety = QGroupBox("Safety checks")
+        safety_layout = QVBoxLayout(self.safety)
+        for widget in (self.verify_box, self.verify_label, self.screen_box, self.screen_label):
+            safety_layout.addWidget(widget)
         self.alternatives_error = QLabel()
         self.alternatives_error.setObjectName("Error")
 
@@ -308,6 +328,7 @@ class StepDialog(QDialog):
         body_layout.addLayout(top)
         body_layout.addWidget(self.action_error)
         body_layout.addWidget(self.form_host)
+        body_layout.addWidget(self.safety)
         body_layout.addWidget(self.advanced)
         body_layout.addStretch(1)
         self.scroll = QScrollArea()
@@ -347,6 +368,8 @@ class StepDialog(QDialog):
                 self._add_alternatives(step)
         if self.action() not in LOCATOR_ACTIONS:
             self.alternatives = None
+        self.safety.setVisible(self.action() in LOCATOR_ACTIONS)
+        self._show_safety()
         self.advanced.setVisible(spec.uses_device)
         if spec.uses_device:
             for field_spec in COMMON_FIELDS:
@@ -380,6 +403,16 @@ class StepDialog(QDialog):
         column.addWidget(hint)
         column.addWidget(self.alternatives_error)
         self.form.addRow("Backup locators (optional)", container)
+
+    def _show_safety(self) -> None:
+        from core.targeting import describe_screen, describe_target
+
+        self.verify_box.setEnabled(bool(self.target))
+        self.screen_box.setEnabled(bool(self.screen_check))
+        self.verify_label.setText(f"Picked: {describe_target(self.target)}" if self.target else
+                                  "Not recorded — use “Pick from screen…” to turn this on.")
+        self.screen_label.setText(f"Screen: {describe_screen(self.screen_check)}" if self.screen_check else
+                                  "Not recorded — use “Pick from screen…” to turn this on.")
 
     def _promote_alternative(self) -> None:
         editor = self.alternatives
@@ -493,8 +526,14 @@ class StepDialog(QDialog):
             self.inputs["package"].setText(dialog.selected_package())
 
     def _pick(self) -> None:
-        def apply(locators: list, position: tuple[float, float] | None = None) -> None:
+        def apply(capture: dict) -> None:
+            locators, position = capture["locators"], capture.get("position")
             (locator_type, locator_value), backups = locators[0], locators[1:]
+            self.target = capture.get("target") or None
+            self.screen_check = capture.get("screen") or None
+            self.verify_box.setChecked(True)
+            self.screen_box.setChecked(True)
+            self._show_safety()
             self.inputs["locator_type"].setCurrentText(locator_type)
             self.inputs["locator_value"].setText(locator_value)
             if self.alternatives is not None:
@@ -514,6 +553,13 @@ class StepDialog(QDialog):
                 step[name] = value
         if self.alternatives is not None and self.alternatives.locators():
             step["alternatives"] = self.alternatives.locators()
+        if self.action() in LOCATOR_ACTIONS:
+            for key, value, box, flag in (("target", self.target, self.verify_box, "verify"),
+                                          ("screen", self.screen_check, self.screen_box, "check_screen")):
+                if value:
+                    step[key] = value
+                    if not box.isChecked():
+                        step[flag] = False
         for key in ACTIONS[self.action()].blocks:
             step[key] = copy.deepcopy(self.original.get(key, []))
         return step
@@ -808,7 +854,7 @@ class BuilderTab(QWidget):
 
     # ------------------------------------------------------------------ picker
 
-    def _pick_locator(self, apply: Callable[[str, str], None]) -> None:
+    def _pick_locator(self, apply: Callable[[dict], None]) -> None:
         self.dashboard.open_inspector(on_pick=apply)
 
     def open_picker(self) -> None:

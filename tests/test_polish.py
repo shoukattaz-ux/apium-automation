@@ -109,17 +109,20 @@ def test_settings_roundtrip_and_default_timeout(tmp_path):
     target.write_text("{not json")
     assert app_settings.load(target).default_timeout_seconds == 15  # corrupt file -> defaults
 
-    class Recording(FakeSession):
-        def click(self, locator_type, locator_value, timeout_seconds=15):
-            self.calls.append(("timeout", timeout_seconds))
-
     app_settings.apply(app_settings.Settings(default_timeout_seconds=7))
-    session = Recording("s1")
-    ScriptRunner(session, {"name": "t", "steps": [
+    timeouts = []
+
+    def find(step, session, main, timeout, quiet=False):
+        timeouts.append(timeout)
+        return session.candidates(*main)[0]
+
+    runner = ScriptRunner(FakeSession("s1", {"id=x": ""}), {"name": "t", "steps": [
         {"action": "click", "locator_type": "id", "locator_value": "x"},
         {"action": "click", "locator_type": "id", "locator_value": "x", "timeout_seconds": 3},
-    ]}).run()
-    assert session.calls == [("timeout", 7.0), ("timeout", 3.0)]
+    ]})
+    runner._find = find
+    runner.run()
+    assert timeouts == [7.0, 3.0]
 
 
 def test_data_dir_falls_back_when_install_folder_is_read_only(tmp_path, monkeypatch):

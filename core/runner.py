@@ -24,13 +24,17 @@ from typing import Any, Callable, Iterable, Mapping
 
 from .devices import DeviceError, DeviceSession, ElementNotFound, RunStopped
 from .history import RunRecorder, StepRecord
+from .inspector import element_at, parse_page_source
 from .settings import default_timeout
+from .targeting import Candidate, anchor_xpath, check, choose, layout_size, parse_bounds, visible_and_settled
 from .schema import (
     ACTIONS, LOCATOR_ACTIONS, ScriptError, describe_step, format_path, load_script, render,
     script_roles,
 )
 
 log = logging.getLogger(__name__)
+
+SETTLE_SECONDS = 0.3  # a matched element must hold still this long before it is tapped
 
 LogCallback = Callable[[str, str], None]  # (serial, message)
 
@@ -388,14 +392,9 @@ class ScriptRunner:
 
         timeout = float(step.get("timeout_seconds", default_timeout()))
         locator = (step.get("locator_type"), value("locator_value"))
-        if action in LOCATOR_ACTIONS and step.get("alternatives") and action != "if_exists":
-            try:
-                locator, timeout = self._locate(step, session, locator, timeout)
-            except ElementNotFound:
-                if action == "click" and self._tap_fallback(step, session):
-                    return None
-                raise
 
+        if action in LOCATOR_ACTIONS:
+            return self._element_step(step, session, locator, timeout, value)
         if action == "wait":
             self._sleep(float(step["seconds"]))
         elif action == "set_variable":
@@ -407,27 +406,6 @@ class ScriptRunner:
             session.open_app(value("package"))
         elif action == "close_app":
             session.close_app(value("package"))
-        elif action == "click":
-            try:
-                session.click(*locator, timeout_seconds=timeout)
-            except ElementNotFound:
-                if not self._tap_fallback(step, session):
-                    raise
-        elif action == "wait_for_element":
-            session.wait_for_element(*locator, timeout_seconds=timeout)
-        elif action == "copy_text":
-            text = session.copy_text(*locator, timeout_seconds=timeout)
-            self.variables[step["save_as"]] = text
-            self.log(f"    copied {text!r} → {step['save_as']}", session)
-        elif action == "paste_text":
-            if step.get("value_from"):
-                key = step["value_from"]
-                if key not in self.variables:
-                    raise DeviceError(f"Nothing was copied into '{key}' yet")
-                text = str(self.variables[key])
-            else:
-                text = value("text", "")
-            session.paste_text(*locator, text, timeout_seconds=timeout)
         elif action == "scroll":
             session.scroll(step.get("direction", "down"), int(step.get("times", 1)))
         elif action == "scroll_to_text":
@@ -442,39 +420,166 @@ class ScriptRunner:
         elif action == "screenshot":
             png = session.screenshot_png()
             return self.recorder.save_screenshot(png, value("name", "screenshot")) if self.recorder else ""
-        elif action == "if_exists":
-            wait = float(step.get("timeout_seconds", 3))
-            if step.get("alternatives"):
-                return session.first_present(self._locators(step, locator), wait) is not None
-            return session.exists(*locator, timeout_seconds=wait)
         else:
             raise DeviceError(f"Unknown action {action!r}")
         return None
 
-    def _tap_fallback(self, step: dict, session: DeviceSession) -> bool:
-        """Tap a Click step's saved backup position, if it has one."""
-        x, y = step.get("fallback_x"), step.get("fallback_y")
-        if x is None or y is None:
-            return False
-        self.log(f"    ⚠ element not found — tapped its saved position ({float(x):g}%, {float(y):g}%)", session)
-        session.tap_percent(x, y)
-        return True
+    # ------------------------------------------------------------ finding elements
+
+    def _element_step(self, step: dict, session: DeviceSession, locator: tuple[str, str], timeout: float,
+                      value: Callable[..., Any]) -> Any:
+        """Steps that act on an element: find the *right* one (see core.targeting), then act on it."""
+        action = step["action"]
+        if action == "if_exists":
+            try:
+                self._find(step, session, locator, float(step.get("timeout_seconds", 3)), quiet=True)
+                return True
+            except ElementNotFound:
+                return False
+        text = ""
+        if action == "paste_text":
+            if step.get("value_from"):
+                key = step["value_from"]
+                if key not in self.variables:
+                    raise DeviceError(f"Nothing was copied into '{key}' yet")
+                text = str(self.variables[key])
+            else:
+                text = value("text", "")
+        try:
+            found = self._find(step, session, locator, timeout)
+        except ElementNotFound:
+            if action == "click" and self._tap_fallback(step, session):
+                return None
+            raise
+        if action == "click":
+            session.click_candidate(found)
+        elif action == "copy_text":
+            copied = session.text_of(found)
+            self.variables[step["save_as"]] = copied
+            self.log(f"    copied {copied!r} → {step['save_as']}", session)
+        elif action == "paste_text":
+            session.type_into(found, text)
+        return None
 
     def _locators(self, step: dict, main: tuple[str, str]) -> list[tuple[str, str]]:
         return [main] + [(alt["locator_type"], render(str(alt["locator_value"]), self.variables))
                          for alt in step.get("alternatives", [])]
 
-    def _locate(self, step: dict, session: DeviceSession, main: tuple[str, str],
-                timeout: float) -> tuple[tuple[str, str], float]:
-        """Pick the first of the step's locators that matches; the action then runs with it."""
+    @staticmethod
+    def _checks(step: dict) -> tuple[dict | None, dict | None]:
+        """The step's fingerprint and screen signature, unless turned off on the step."""
+        target = step.get("target") if step.get("verify", True) else None
+        screen = step.get("screen") if step.get("check_screen", True) else None
+        return target or None, screen or None
+
+    def _find(self, step: dict, session: DeviceSession, main: tuple[str, str], timeout: float,
+              quiet: bool = False) -> Candidate:
+        """Find the element the step is about, trying its locators in order until ``timeout``.
+
+        A locator only counts when what it matched fits the picked element's fingerprint
+        (a different element, or several look-alikes, is rejected and the next locator is
+        tried), the phone shows the screen the step was recorded on, and the element is
+        on screen and has stopped moving. Rejections are logged once each.
+        """
         locators = self._locators(step, main)
-        index = session.first_present(locators, timeout)
-        if index is None:
-            raise ElementNotFound(f"Element not found within {timeout:g}s by any of its {len(locators)} locators")
-        if index:
-            self.log(f"    ↪ main locator didn't match; found with backup {index + 1}: "
-                     f"{locators[index][0]}={locators[index][1]}", session)
-        return locators[index], min(timeout, 5.0)  # it's on screen now
+        target, screen = self._checks(step)
+        deadline = time.monotonic() + max(0.0, timeout)
+        size: tuple[int, int] | None = None
+        invalid: set[int] = set()
+        noted: set[str] = set()
+        reason = "no locator matched"
+
+        def note(message: str) -> None:
+            if not quiet and message not in noted:
+                noted.add(message)
+                self.log(f"    {message}", session)
+
+        while True:
+            if self.stop_event.is_set():
+                raise RunStopped()
+            on_screen, why = self._screen_matches(session, screen) if screen else (True, "")
+            if not on_screen:
+                reason = why
+            else:
+                if size is None and target:
+                    size = session.window_size()
+                for index, (locator_type, locator_value) in enumerate(locators):
+                    if index in invalid:
+                        continue
+                    name = "main locator" if index == 0 else f"backup {index + 1}"
+                    try:
+                        matches = session.candidates(locator_type, locator_value)
+                    except ElementNotFound:
+                        matches = []
+                    except Exception as exc:
+                        if not _invalid_locator(exc):
+                            raise  # e.g. the session was lost: handled by the step's caller
+                        invalid.add(index)
+                        note(f"✗ {name} is not a valid locator ({locator_type}={locator_value}) — skipped")
+                        continue
+                    chosen, why = choose(target, matches, size)
+                    if chosen is None:
+                        if matches:
+                            reason = f"{name} {why}"
+                            note(f"✗ {name} {why} — skipped")
+                        continue
+                    if why:
+                        note(f"⚠ {name} {why}")
+                    self._sleep(SETTLE_SECONDS)
+                    settled, why = visible_and_settled(chosen.bounds, parse_bounds(session.bounds_of(chosen)), size)
+                    if not settled:
+                        reason = why
+                        break  # look again on the next pass
+                    if index:
+                        self.log(f"    ↪ found with {name}: {locator_type}={locator_value}", session)
+                    return chosen
+            if time.monotonic() >= deadline:
+                raise ElementNotFound(f"Element not found within {timeout:g}s: {reason}")
+            self._sleep(0.5)
+
+    @staticmethod
+    def _screen_matches(session: DeviceSession, screen: dict) -> tuple[bool, str]:
+        package = screen.get("package")
+        if package:
+            current = session.current_package()
+            if current != package:
+                return False, f"wrong app on screen ({current or 'none'}, expected {package})"
+        anchors = screen.get("anchors") or []
+        if anchors and not any(session.exists(*anchor_xpath(anchor), timeout_seconds=0) for anchor in anchors):
+            return False, f"not on the picked screen (none of {', '.join(repr(a[1]) for a in anchors)} showing)"
+        return True, ""
+
+    def _tap_fallback(self, step: dict, session: DeviceSession) -> bool:
+        """Tap a Click step's saved position, but only where it is safe to.
+
+        With a screen signature, the phone must be on the picked screen; with a
+        fingerprint, the element under that point must fit it. Otherwise the step fails
+        instead of tapping whatever happens to be there now.
+        """
+        x, y = step.get("fallback_x"), step.get("fallback_y")
+        if x is None or y is None:
+            return False
+        target, screen = self._checks(step)
+        if screen:
+            on_screen, why = self._screen_matches(session, screen)
+            if not on_screen:
+                self.log(f"    ✗ backup position not used: {why}", session)
+                return False
+        if target:
+            elements = parse_page_source(session.page_source())
+            width, height = layout_size(elements)
+            point = (float(x) / 100 * width, float(y) / 100 * height)
+            under = [e for e in elements if e.contains(*point)]
+            if not any(check(target, {"class": e.class_name, "resource-id": e.resource_id, "text": e.text,
+                                      "content-desc": e.content_desc, "bounds": list(e.bounds)}, (width, height))[0]
+                       for e in under):
+                there = element_at(elements, *point)
+                self.log(f"    ✗ backup position not used: {there.label() if there else 'nothing'} is there now, "
+                         "not the picked element", session)
+                return False
+        self.log(f"    ⚠ element not found — tapped its saved position ({float(x):g}%, {float(y):g}%)", session)
+        session.tap_percent(x, y)
+        return True
 
     # ------------------------------------------------------------ Python
 
@@ -528,6 +633,12 @@ def _final_message(result: RunResult) -> str:
     if result.state == RunState.STOPPED:
         return "Stopped"
     return f"Failed: {result.error}" if result.error else "Failed"
+
+
+def _invalid_locator(exc: Exception) -> bool:
+    """A malformed locator (as opposed to e.g. "invalid session id", which means the phone is gone)."""
+    return (isinstance(exc, ValueError) or type(exc).__name__ == "InvalidSelectorException"
+            or "invalid selector" in str(exc).lower())
 
 
 def _first_line(exc: BaseException) -> str:
