@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import TYPE_CHECKING, Callable
 
@@ -23,10 +24,12 @@ from PySide6.QtWidgets import (
 from core import paths
 from core.devices import DeviceError
 from core.inspector import UiElement, clickable_target, element_at, parse_page_source, suggest_locators
-from core.targeting import fingerprint, screen_signature
+from core.targeting import fingerprint, layout_size, screen_signature
 
 from .qtutil import safe_emit
 from .theme import ACCENT
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .dashboard import MainWindow
@@ -130,6 +133,7 @@ class InspectorWindow(QWidget):
         self.elements: list[UiElement] = []
         self.selected: UiElement | None = None
         self.suggestions: list = []
+        self.png: bytes = b""  # the current screenshot, for cutting out the picked element's picture
         self._busy = False
         self.signals = _Signals(self)  # parented: dropped with the window if a worker finishes late
         self.signals.loaded.connect(self._show_screen)
@@ -278,6 +282,7 @@ class InspectorWindow(QWidget):
         if error:
             self.status.setText(f"✖ {error}")
             return
+        self.png = png
         pixmap = QPixmap()
         pixmap.loadFromData(png, "PNG")
         try:
@@ -358,7 +363,27 @@ class InspectorWindow(QWidget):
         if not unique and chosen:
             return [chosen]
         unique.sort(key=lambda s: (s.fragile, (s.locator_type, s.locator_value) != chosen))
-        return [(s.locator_type, s.locator_value) for s in unique]
+        ranked = [(s.locator_type, s.locator_value) for s in unique if not s.fragile]
+        picture = self._picture()
+        if picture:  # after the stable locators, before the positional ones
+            ranked.append(("image", picture))
+        return ranked + [(s.locator_type, s.locator_value) for s in unique if s.fragile]
+
+    def _picture(self) -> str:
+        """Save the selected element's picture under configs/images; its path, or '' if not useful."""
+        from core import imagematch
+
+        if self.selected is None or not self.png or not self.elements:
+            return ""
+        layout = layout_size(self.elements)
+        if not imagematch.worth_keeping(self.selected.bounds, layout):
+            return ""
+        try:
+            crop = imagematch.crop_png(self.png, self.selected.bounds, layout)
+            return imagematch.save_template(crop, paths.configs_dir() / "images")
+        except (OSError, ValueError) as exc:
+            log.warning("Could not save the element's picture: %s", exc)
+            return ""
 
     def _step_for(self, action: str) -> dict:
         """A step for the selected element: best locator as the main one, the rest as backups."""

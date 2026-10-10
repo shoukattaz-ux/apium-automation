@@ -148,6 +148,30 @@ def self_test() -> int:
         import PySide6
         return f"PySide6 {PySide6.__version__}"
 
+    def element_matching():
+        # Layout snapshots (lxml) and picture matching (numpy, Pillow): run them, not just import them.
+        import io
+
+        import numpy as np
+        from PIL import Image, ImageDraw
+
+        from core import imagematch
+        from core.localfind import LocalScreen
+
+        snapshot = LocalScreen('<hierarchy><node class="a" text="Go" bounds="[0,0][10,10]"/></hierarchy>')
+        if len(snapshot.evaluate("xpath", '//*[@text="Go" and @class="a"]')) != 1:
+            raise RuntimeError("layout snapshot found the wrong elements")
+        screen = Image.new("L", (200, 300), 230)
+        ImageDraw.Draw(screen).ellipse([60, 100, 120, 150], outline=0, width=5)
+        buffer = io.BytesIO()
+        screen.save(buffer, "PNG")
+        shot = imagematch.load_gray(buffer.getvalue())
+        match = imagematch.search(shot, shot[95:155, 55:125].copy())
+        if not match or match.bounds[:2] != (55, 95):
+            raise RuntimeError(f"picture matching found {match}")
+        import lxml
+        return f"numpy {np.__version__}, Pillow {Image.__version__}, lxml {lxml.__version__}"
+
     def bundled_tools():
         from core.appium_server import find_appium_command
         from core.devices import adb_path
@@ -164,6 +188,7 @@ def self_test() -> int:
     check("appium_client", appium_client)
     check("selenium", selenium_wait)
     check("qt", qt)
+    check("element_matching", element_matching)
     check("bundled_tools", bundled_tools)
     check("example_scripts", example_scripts)
     report = json.dumps({"ok": ok, "version": APP_VERSION, "checks": results}, indent=2)

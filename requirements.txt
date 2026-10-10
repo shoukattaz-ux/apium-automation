@@ -1,3 +1,6 @@
 Appium-Python-Client>=4.0,<7
 PySide6>=6.6,<7
+numpy>=1.26,<3
+Pillow>=10,<13
+lxml>=5,<7
 pytest>=8

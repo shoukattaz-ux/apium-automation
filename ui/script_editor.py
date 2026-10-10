@@ -20,7 +20,7 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QFontDatabase, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
@@ -33,7 +33,7 @@ from core.devices import DeviceError, list_installed_packages
 from core.settings import default_timeout
 from core.schema import (
     ACTION_LABELS, ACTIONS, BLOCK_LABELS, COMMON_FIELDS, DEFAULT_TIMEOUT_SECONDS, LOCATOR_ACTIONS, LOCATOR_TYPES,
-    TITLE_FIELD, FieldSpec, ScriptError, describe_step, format_path, roles_to_titles,
+    MAX_AGREE, TITLE_FIELD, FieldSpec, ScriptError, describe_step, format_path, roles_to_titles,
     safe_filename, save_script, script_roles, script_variables, validate_script, validate_step,
 )
 
@@ -73,7 +73,8 @@ class LocatorListEditor(QWidget):
     def __init__(self, locators: list[dict] | None = None, parent=None):
         super().__init__(parent)
         self.list = QListWidget()
-        self.list.setMaximumHeight(110)
+        self.list.setMaximumHeight(130)
+        self.list.setIconSize(QSize(48, 32))
         self.list.setToolTip("Tried in this order when the main locator doesn't find the element")
         self.type_combo = QComboBox()
         self.type_combo.addItems(LOCATOR_TYPES)
@@ -119,9 +120,20 @@ class LocatorListEditor(QWidget):
                 for i in range(self.list.count())]
 
     def _append(self, locator_type: str, locator_value: str) -> None:
-        item = QListWidgetItem(f"{self.list.count() + 2}.  {locator_type}  =  {locator_value}")
+        number = self.list.count() + 2
+        if locator_type == "image":
+            item = QListWidgetItem(f"{number}.  picture of the element  ({locator_value})")
+            picture = paths.configs_dir() / locator_value
+            if picture.is_file():
+                item.setIcon(QIcon(str(picture)))
+            else:
+                item.setText(item.text() + "  — file missing")
+            item.setToolTip("Matched against the screen: it votes for the element that still looks like "
+                            "this, and can find it alone when every other locator fails")
+        else:
+            item = QListWidgetItem(f"{number}.  {locator_type}  =  {locator_value}")
+            item.setToolTip(locator_value)
         item.setData(Qt.UserRole, (locator_type, locator_value))
-        item.setToolTip(locator_value)
         self.list.addItem(item)
 
     def _renumber(self) -> None:
@@ -279,12 +291,24 @@ class StepDialog(QDialog):
         for label in (self.verify_label, self.screen_label):
             label.setObjectName("Muted")
             label.setWordWrap(True)
+        self.agree = QSpinBox()
+        self.agree.setRange(0, MAX_AGREE)
+        self.agree.setSpecialValueText("Auto")
+        self.agree.setValue(int((step or {}).get("min_agree") or 0))
+        self.agree.setToolTip("How many locators (the picture counts as one) must point at the same "
+                              "element before the step acts. Auto: 2 when the step has 3 or more, else 1. "
+                              "If two elements get the same number of votes, the step refuses.")
+        agree_row = QHBoxLayout()
+        agree_row.addWidget(QLabel("Locators that must agree"))
+        agree_row.addWidget(self.agree)
+        agree_row.addStretch(1)
         self.verify_box.setChecked((step or {}).get("verify", True) is not False)
         self.screen_box.setChecked((step or {}).get("check_screen", True) is not False)
         self.safety = QGroupBox("Safety checks")
         safety_layout = QVBoxLayout(self.safety)
         for widget in (self.verify_box, self.verify_label, self.screen_box, self.screen_label):
             safety_layout.addWidget(widget)
+        safety_layout.addLayout(agree_row)
         self.alternatives_error = QLabel()
         self.alternatives_error.setObjectName("Error")
 
@@ -560,6 +584,8 @@ class StepDialog(QDialog):
                     step[key] = value
                     if not box.isChecked():
                         step[flag] = False
+            if self.agree.value():
+                step["min_agree"] = self.agree.value()
         for key in ACTIONS[self.action()].blocks:
             step[key] = copy.deepcopy(self.original.get(key, []))
         return step

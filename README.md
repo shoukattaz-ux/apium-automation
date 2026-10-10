@@ -61,6 +61,7 @@ others.
 | `core/runner.py` | `ScriptRunner` (blocks, retries, on-fail, roles, variables, reports), `run_repeatedly`, `run_script_on_devices`. |
 | `core/manager.py` | Session and run management: one run per phone, workflows reserve all their phones, repeats, finish hooks. |
 | `core/history.py` | Run recorder, JSON/HTML reports, failure screenshots, CSV export. |
+| `core/localfind.py`, `core/imagematch.py` | One layout snapshot per look for all locators; picture search and comparison. |
 | `core/targeting.py` | Safety checks: element fingerprint, screen signature, rejecting wrong or ambiguous matches. |
 | `core/inspector.py` | Parses the screen hierarchy, finds the element under a point, ranks locators. |
 | `core/scheduler.py` | Daily / interval schedules stored in `configs/schedules.json`. |
@@ -156,8 +157,21 @@ moving. The backup tap position is only used if the picked element is still
 under it. Either check can be turned off per step (`"verify": false`,
 `"check_screen": false`). Logic: `core/targeting.py`.
 
+**Votes.** Each look at the screen reads the layout once (`core/localfind.py`)
+and every locator votes for the element it matched (if it fits the
+fingerprint). The element with the most votes is used when it has at least
+`min_agree` votes (default: 2 for steps with three or more locators, else 1)
+and no other element ties with it; outvoted locators are named in the log.
+
+**Pictures.** The picker also saves the element's image in `configs/images`
+and adds it as an `image` locator. The picture votes for the found element
+that still looks like it, and if no locator settles on the element, a Click
+taps the picture's position when it is found exactly once with a strong match
+(`core/imagematch.py`, numpy + Pillow). Pictures suit icons, tabs and buttons;
+they don't carry over to other phone models or themes.
+
 Locator types: `id`, `xpath`, `accessibility id`, `text` (exact visible text),
-`class name`, `android uiautomator`. All device steps also accept `device`
+`class name`, `android uiautomator`, `image` (a PNG under `configs/`). All device steps also accept `device`
 (phone role), `retries` and `on_fail` (`skip` or `stop`). Built-in variables:
 `{{run_number}}`, `{{loop_index}}`, `{{device}}`, `{{date}}`, `{{time}}`.
 

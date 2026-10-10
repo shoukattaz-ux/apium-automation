@@ -108,7 +108,7 @@ def parse_page_source(xml_text: str) -> list[UiElement]:
                     parent.children.append(element)
             walk(child, child_path, depth + 1, element or parent)
 
-    walk(root, "", 0, None)
+    walk(root, f"/{root.tag}", 0, None)  # absolute paths start at the root (<hierarchy>), as on the phone
     return elements
 
 

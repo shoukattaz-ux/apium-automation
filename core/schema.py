@@ -43,7 +43,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-LOCATOR_TYPES = ["id", "xpath", "accessibility id", "text", "class name", "android uiautomator"]
+LOCATOR_TYPES = ["id", "xpath", "accessibility id", "text", "class name", "android uiautomator", "image"]
+MAX_AGREE = 10
 DIRECTIONS = ["up", "down", "left", "right"]
 KEYS = ["back", "home", "enter", "recent_apps", "delete", "search", "menu", "volume_up", "volume_down"]
 ON_FAIL = ["skip", "stop"]
@@ -345,6 +346,10 @@ def validate_step(step: dict) -> dict[str, str]:
         for key in ("target", "screen"):
             if key in step and not isinstance(step[key], dict):
                 errors[key] = f"{key} must be an object"
+        agree = step.get("min_agree")
+        if agree not in (None, "") and (isinstance(agree, bool) or not str(agree).isdigit()
+                                        or not 0 <= int(agree) <= MAX_AGREE):
+            errors["min_agree"] = f"Locators that must agree: a whole number from 1 to {MAX_AGREE}"
     if action == "click" and (step.get("fallback_x") is None) != (step.get("fallback_y") is None):
         errors["fallback_y" if step.get("fallback_y") is None else "fallback_x"] = \
             "Set both X and Y for the backup tap, or neither"
@@ -352,7 +357,12 @@ def validate_step(step: dict) -> dict[str, str]:
 
 
 def _locator_problem(locator_type: Any, locator_value: Any) -> str:
-    """Catch the common mix-up of an XPath saved under another locator type."""
+    """Catch the common mix-up of an XPath saved under another locator type, and bad image paths."""
+    if locator_type == "image":
+        value = str(locator_value or "").replace("\\", "/")
+        if not value.lower().endswith(".png") or value.startswith("/") or ".." in value.split("/") or ":" in value:
+            return "An image locator is a PNG inside the configs folder, e.g. images/abc.png"
+        return ""
     if locator_type != "xpath" and isinstance(locator_value, str) and _LOOKS_LIKE_XPATH.match(locator_value):
         return "This value is an XPath — set “Find element by” to xpath"
     return ""
@@ -433,6 +443,8 @@ def normalize_step(step: dict) -> dict:
         for key in ("verify", "check_screen"):
             if step.get(key) is False:
                 clean[key] = False
+        if str(step.get("min_agree") or "0").isdigit() and int(step.get("min_agree") or 0) > 0:
+            clean["min_agree"] = int(step["min_agree"])
     for key in ACTIONS[action].blocks:
         children = step.get(key) or []
         if children or key != "else":
@@ -491,6 +503,8 @@ def describe_step(step: dict, with_title: bool = True) -> str:
               if step.get(key) and step.get(flag, True)]
     if checks:
         extras.append(f"checks {' + '.join(checks)}")
+    if step.get("min_agree"):
+        extras.append(f"{step['min_agree']} must agree")
     if step.get("alternatives"):
         count = len(step["alternatives"])
         extras.append(f"+{count} backup locator{'s' if count > 1 else ''}")

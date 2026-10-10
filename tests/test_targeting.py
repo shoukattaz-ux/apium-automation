@@ -68,7 +68,7 @@ def test_wrong_element_from_a_locator_is_rejected_and_the_next_one_used():
         "alternatives": [{"locator_type": "id", "locator_value": "com.shop:id/pay_row"}], "target": TARGET}])
     assert ("click", "id=com.shop:id/pay_row") in session.calls and ("click", "xpath=//weak") not in session.calls
     assert any("main locator found a different element" in line for line in lines)
-    assert any("found with backup 2" in line for line in lines)
+    assert any("1 of 2 locators agree: backup 2" in line for line in lines)
     assert not result.skipped_steps
 
 
@@ -147,3 +147,190 @@ def test_lost_session_is_not_mistaken_for_a_bad_locator():
     result, lines = run(session, [{"action": "click", "locator_type": "id", "locator_value": "x",
                                    "timeout_seconds": 0}])
     assert result.state == RunState.FAILED and not any("not a valid locator" in line for line in lines)
+
+
+# ------------------------------------------------------------------ votes
+
+def _row_at(top):
+    return {**ROW, "bounds": f"[20,{top}][380,{top + 100}]"}
+
+
+def _alts(*keys):
+    return [{"locator_type": "xpath", "locator_value": key} for key in keys]
+
+
+def test_most_votes_win_and_the_outvoted_locator_is_reported():
+    session = FakeSession("S1", {f"xpath={k}": "" for k in ("//a", "//b", "//c", "//odd")})
+    for key in ("xpath=//a", "xpath=//b", "xpath=//c"):
+        session.attrs[key] = _row_at(600)
+    session.attrs["xpath=//odd"] = _row_at(100)        # fits the fingerprint, but a different row
+    result, lines = run(session, [{"action": "click", "locator_type": "xpath", "locator_value": "//a",
+                                   "timeout_seconds": 0, "target": TARGET, "alternatives": _alts("//b", "//c", "//odd")}])
+    assert not result.skipped_steps
+    assert any("3 of 4 locators agree" in line for line in lines)
+    assert any("backup 4 pointed at a different element" in line and "outvoted 3 to 1" in line for line in lines)
+
+
+def test_a_tie_between_two_elements_is_refused():
+    session = FakeSession("S1", {f"xpath={k}": "" for k in ("//a", "//b", "//c", "//d")})
+    session.attrs["xpath=//a"] = session.attrs["xpath=//b"] = _row_at(600)
+    session.attrs["xpath=//c"] = session.attrs["xpath=//d"] = _row_at(100)
+    result, lines = run(session, [{"action": "click", "locator_type": "xpath", "locator_value": "//a",
+                                   "timeout_seconds": 0, "target": TARGET, "alternatives": _alts("//b", "//c", "//d")}])
+    assert result.skipped_steps and not [c for c in session.calls if c[0] == "click"]
+    assert any("locators disagree" in line and "not guessing" in line for line in lines)
+
+
+def test_quorum_default_and_setting():
+    session = FakeSession("S1", {"xpath=//a": ""})
+    session.attrs["xpath=//a"] = _row_at(600)
+    step = {"action": "click", "locator_type": "xpath", "locator_value": "//a", "timeout_seconds": 0,
+            "target": TARGET, "alternatives": _alts("//gone1", "//gone2")}
+    result, lines = run(session, [step])   # 3 locators, only 1 matches: default needs 2
+    assert result.skipped_steps and any("only 1 of 3 locators agree" in line and "needs 2" in line for line in lines)
+    result, _ = run(session, [{**step, "min_agree": 1}])
+    assert not result.skipped_steps
+    result, lines = run(session, [{**step, "alternatives": _alts("//gone1")}])  # 2 locators: 1 is enough
+    assert not result.skipped_steps
+
+
+# ------------------------------------------------------------------ pictures
+
+def _screen_png(icon_at=(240, 600), second_icon_at=None):
+    """A 400×800 'screenshot' with a distinctive icon (120×80) drawn at ``icon_at``."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    screen = Image.new("L", (400, 800), 225)
+    draw = ImageDraw.Draw(screen)
+    for i in range(12):
+        draw.rectangle([10 + i * 30, 300 + (i % 3) * 40, 30 + i * 30, 320 + (i % 3) * 40], fill=40 + i * 15)
+    icon = Image.new("L", (120, 80), 255)
+    icon_draw = ImageDraw.Draw(icon)
+    icon_draw.ellipse([20, 10, 100, 70], outline=0, width=6)
+    icon_draw.line([35, 40, 85, 40], fill=0, width=6)
+    for at in (icon_at, second_icon_at):
+        if at:
+            screen.paste(icon, at)
+    out = io.BytesIO()
+    screen.save(out, "PNG")
+    return out.getvalue(), icon
+
+
+def _save_icon(tmp_path, icon, monkeypatch):
+    from core import paths
+
+    monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
+    (tmp_path / "configs" / "images").mkdir(parents=True)
+    icon.save(tmp_path / "configs" / "images" / "icon.png")
+    return {"locator_type": "image", "locator_value": "images/icon.png"}
+
+
+ICON_TARGET = {**TARGET, "bounds": [240, 600, 360, 680]}
+
+
+def test_picture_adds_a_vote_only_when_it_looks_the_same(tmp_path, monkeypatch):
+    png, icon = _screen_png()
+    picture = _save_icon(tmp_path, icon, monkeypatch)
+    session = FakeSession("S1", {"xpath=//a": "", "xpath=//b": ""})
+    session.shot = png
+    session.attrs["xpath=//a"] = session.attrs["xpath=//b"] = {**ROW, "bounds": "[240,600][360,680]"}
+    step = {"action": "click", "locator_type": "xpath", "locator_value": "//a", "timeout_seconds": 0,
+            "target": ICON_TARGET, "alternatives": [{"locator_type": "xpath", "locator_value": "//b"}, picture]}
+    result, lines = run(session, [step])
+    assert not result.skipped_steps and any("3 of 3 locators agree: main locator, backup 2, picture" in l for l in lines)
+
+    # The locators found something at a place that doesn't look like the picked element.
+    session.shot, _ = _screen_png(icon_at=(20, 20))
+    result, lines = run(session, [step])
+    assert any("picture doesn't look like what the locators found" in line for line in lines)
+    assert any("2 of 3 locators agree" in line for line in lines) and not result.skipped_steps
+
+
+def test_picture_rescues_a_click_only_when_found_once(tmp_path, monkeypatch):
+    png, icon = _screen_png(icon_at=(240, 600))
+    picture = _save_icon(tmp_path, icon, monkeypatch)
+    step = {"action": "click", "locator_type": "xpath", "locator_value": "//gone", "timeout_seconds": 0,
+            "target": ICON_TARGET, "alternatives": [picture]}
+    session = FakeSession("S1")
+    session.shot = png
+    result, lines = run(session, [step])
+    assert ("tap", 300, 640) in session.calls and not result.skipped_steps   # centre of the icon
+    assert any("found by its picture" in line for line in lines)
+
+    session = FakeSession("S1")
+    session.shot, _ = _screen_png(icon_at=(240, 600), second_icon_at=(20, 100))
+    result, lines = run(session, [step])
+    assert not [c for c in session.calls if c[0] == "tap"] and result.skipped_steps
+    assert any("appears more than once" in line for line in lines)
+
+
+# ------------------------------------------------------------------ layout snapshot & image matching
+
+def test_every_picker_locator_finds_the_same_element_in_a_layout_snapshot():
+    from core.inspector import suggest_locators
+    from core.localfind import LocalScreen
+    from tests.test_core import FB_LITE_TABS
+
+    for source in (PAGE_SOURCE, FB_LITE_TABS):
+        snapshot, elements = LocalScreen(source), parse_page_source(source)
+        for element in elements:
+            for suggestion in suggest_locators(element, elements):
+                found = snapshot.evaluate(suggestion.locator_type, suggestion.locator_value)
+                assert found is not None, suggestion
+                if suggestion.unique:
+                    assert [f["bounds"] for f in found] == ["[%d,%d][%d,%d]" % element.bounds], suggestion
+                else:
+                    assert len(found) == suggestion.matches, suggestion
+    snapshot = LocalScreen(PAGE_SOURCE)
+    assert snapshot.evaluate("android uiautomator", 'new UiSelector().scrollable(true)') is None  # ask the phone
+    assert len(snapshot.evaluate("id", "item")) == 2  # bare id: the app's package is implied
+    import pytest
+    with pytest.raises(ValueError):
+        snapshot.evaluate("xpath", "//*[")
+
+
+def test_session_uses_one_snapshot_for_all_locators():
+    from core.devices import DeviceSession, LocalHandle
+
+    class Driver:
+        page_source = PAGE_SOURCE
+        calls = 0
+
+        def find_elements(self, *_):
+            Driver.calls += 1
+            return []
+
+        def tap(self, points):
+            self.tapped = points
+
+    session = DeviceSession("S1", connect=False)
+    session.driver = Driver()
+    session.begin_pass()
+    rows = session.candidates("id", "com.shop:id/pay_row")
+    assert Driver.calls == 0 and isinstance(rows[0].handle, LocalHandle)
+    assert rows[0].attrs["class"] == "android.widget.LinearLayout"
+    assert session.text_of(session.candidates("text", "Pay now")[0]) == "Pay now"
+    session.click_candidate(rows[0])
+    assert session.driver.tapped == [(200, 650)]  # centre of [20,600][380,700]
+
+
+def test_image_search_and_check():
+    import numpy as np
+
+    from core import imagematch
+
+    png, icon = _screen_png(icon_at=(240, 600))
+    shot, template = imagematch.load_gray(png), np.asarray(icon, np.float32) / 255
+    match = imagematch.search(shot, template)
+    assert match and match.unique and match.bounds == (240, 600, 360, 680) and match.score > 0.99
+    assert imagematch.similarity(shot, template, (240, 600, 360, 680)) > 0.99
+    assert imagematch.similarity(shot, template, (20, 20, 140, 100)) < 0.5
+    twice, _ = _screen_png(icon_at=(240, 600), second_icon_at=(20, 100))
+    assert not imagematch.search(imagematch.load_gray(twice), template).unique
+    flat = np.full((80, 120), 0.5, np.float32)
+    assert imagematch.search(shot, flat) is None  # a plain patch can't identify anything
+    assert imagematch.worth_keeping((0, 0, 100, 60), (400, 800))
+    assert not imagematch.worth_keeping((0, 0, 8, 8), (400, 800))
+    assert not imagematch.worth_keeping((0, 0, 400, 700), (400, 800))

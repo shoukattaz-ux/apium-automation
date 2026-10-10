@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from itertools import count
 from typing import Callable
 
@@ -148,6 +149,19 @@ def list_installed_packages(serial: str, third_party_only: bool = True) -> list[
     args = ["shell", "pm", "list", "packages"] + (["-3"] if third_party_only else [])
     output = run_adb(*args, serial=serial)
     return sorted(line.split(":", 1)[1].strip() for line in output.splitlines() if line.startswith("package:"))
+
+
+@dataclass(frozen=True)
+class LocalHandle:
+    """A match found in a layout snapshot: enough to find it again or tap it."""
+
+    locator_type: str
+    locator_value: str
+    bounds: str
+
+
+def _looks_lost(exc: Exception) -> bool:
+    return type(exc).__name__ in {"InvalidSessionIdException", "MaxRetryError", "NewConnectionError"}
 
 
 class DeviceSession:
@@ -375,10 +389,39 @@ class DeviceSession:
     CANDIDATE_ATTRS = ("class", "resource-id", "text", "content-desc", "bounds", "displayed")
     MAX_CANDIDATES = 6
 
+    def begin_pass(self) -> None:
+        """Take one snapshot of the screen layout; ``candidates`` evaluates locators against it.
+
+        One page-source read replaces several phone round trips per locator, so a step
+        can check all its locators (and count how many agree) in well under a second.
+        """
+        from .localfind import LocalScreen
+
+        self._screen = None
+        self._screenshot = None
+        try:
+            self._screen = LocalScreen(self.page_source())
+        except Exception as exc:  # unreadable layout: fall back to asking the phone per locator
+            if _looks_lost(exc):
+                raise
+            log.debug("Layout snapshot failed: %s", exc)
+
+    def screenshot_for_pass(self) -> bytes:
+        """A screenshot taken once per look (for image checks)."""
+        if getattr(self, "_screenshot", None) is None:
+            self._screenshot = self.screenshot_png()
+        return self._screenshot
+
     def candidates(self, locator_type: str, locator_value: str) -> list:
         """All elements ``locator`` matches right now (no waiting), with their attributes."""
         from .targeting import Candidate
 
+        screen = getattr(self, "_screen", None)
+        if screen is not None:
+            matches = screen.evaluate(locator_type, locator_value)
+            if matches is not None:
+                return [Candidate(LocalHandle(locator_type, locator_value, attrs.get("bounds", "")), attrs)
+                        for attrs in matches[:self.MAX_CANDIDATES]]
         by, value = to_appium_locator(locator_type, locator_value)
         found = self._require_driver().find_elements(by, value)
         result = []
@@ -396,19 +439,39 @@ class DeviceSession:
                     result.append(Candidate(element, attrs))
         return result
 
-    def bounds_of(self, candidate) -> str:
-        """Fresh bounds of a matched element ('' if it's gone), to see whether it is still moving."""
-        try:
-            return candidate.handle.get_attribute("bounds") or ""
-        except Exception as exc:
-            if "stale" in str(exc).lower():
-                return ""
-            raise
+    def _element_for(self, candidate):
+        """The WebElement behind a candidate (found again by its locator and bounds for snapshot matches)."""
+        handle = candidate.handle
+        if not isinstance(handle, LocalHandle):
+            return handle
+        by, value = to_appium_locator(handle.locator_type, handle.locator_value)
+        found = self._require_driver().find_elements(by, value)
+        for element in found:
+            if element.get_attribute("bounds") == handle.bounds:
+                return element
+        if found:
+            return found[0]
+        raise ElementNotFound(f"Element {handle.locator_type}={handle.locator_value} disappeared")
 
     def click_candidate(self, candidate) -> None:
-        candidate.handle.click()
+        handle = candidate.handle
+        if isinstance(handle, LocalHandle):
+            from .targeting import parse_bounds
+
+            bounds = parse_bounds(handle.bounds)
+            if bounds:  # a tap at the centre is exactly what an element click does
+                self.tap((bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2)
+                return
+        self._element_for(candidate).click()
 
     def text_of(self, candidate) -> str:
+        if isinstance(candidate.handle, LocalHandle):
+            text = candidate.attrs.get("text") or candidate.attrs.get("content-desc") or ""
+            try:
+                self.driver.set_clipboard_text(text)
+            except Exception:
+                pass
+            return text
         element = candidate.handle
         text = element.text or element.get_attribute("text") or element.get_attribute("content-desc") or ""
         try:
@@ -418,7 +481,7 @@ class DeviceSession:
         return text
 
     def type_into(self, candidate, text: str) -> None:
-        element = candidate.handle
+        element = self._element_for(candidate)
         element.click()
         element.clear()
         element.send_keys(text)
@@ -436,6 +499,8 @@ def to_appium_locator(locator_type: str, locator_value: str) -> tuple[str, str]:
     from appium.webdriver.common.appiumby import AppiumBy
 
     kind = locator_type.strip().lower()
+    if kind == "image":
+        raise DeviceError("Image locators work in builder steps (the runner matches the picture itself)")
     if kind == "text":
         escaped = locator_value.replace("\\", "\\\\").replace('"', '\\"')
         return AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{escaped}")'

@@ -195,7 +195,7 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     fragile_pick = editor.builder.steps.pop()
     assert fragile_pick["locator_value"] == "com.shop:id/order"  # a stable locator stays the main one
     tail = [alt["locator_value"] for alt in fragile_pick["alternatives"][-2:]]  # fragile ones last
-    assert tail[0].startswith("/android.widget.FrameLayout") and ".instance(" in tail[1]
+    assert tail[0].startswith("/hierarchy/android.widget.FrameLayout") and ".instance(" in tail[1]
     inspector.locators.setCurrentRow(1)  # a stable one is honoured as main
     inspector._add_step("click")
     assert editor.builder.steps.pop()["locator_type"] == "text"
@@ -217,18 +217,23 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     assert (recorded["fallback_x"], recorded["fallback_y"]) == (50.0, 81.2)  # centre of [20,600][380,700]
 
     # Picking for the Edit Step dialog: all unique locators (highlighted one first) and the position.
+    from tests.test_targeting import _screen_png
+
+    session.shot, _ = _screen_png(icon_at=(330, 0))  # a realistic 400×800 screenshot
     picked = []
     picker = window.open_inspector(on_pick=picked.append)
     assert picker.isModal()  # otherwise the modal Edit Step dialog blocks it
     assert wait_for(app, lambda: bool(picker.elements))
     picker._click(380, 20)
     picker._use_locator()
-    menu_xpath = "/android.widget.FrameLayout/android.widget.ImageButton"
+    menu_xpath = "/hierarchy/android.widget.FrameLayout/android.widget.ImageButton"
     locators, position = picked[0]["locators"], picked[0]["position"]
     assert picked[0]["target"]["class"] == "android.widget.ImageButton" and picked[0]["target"]["desc"] == "Menu"
     assert picked[0]["screen"]["anchors"]  # landmarks recorded with the screen
     assert locators[0] == ("accessibility id", "Menu") and locators[-1] == ("xpath", menu_xpath)
-    assert {t for t, _ in locators} == {"accessibility id", "android uiautomator", "xpath", "class name"}
+    assert {t for t, _ in locators} == {"accessibility id", "android uiautomator", "xpath", "class name", "image"}
+    picture = next(v for t, v in locators if t == "image")
+    assert (configs / picture).is_file() and locators.index(("image", picture)) == len(locators) - 3  # before fragile
     assert position == (92.5, 2.5)
 
     from ui.script_editor import StepDialog
@@ -252,7 +257,15 @@ def test_inspector_picks_and_records(app, configs, window_factory):
         dialog.alternatives._move(-1)
     dialog._promote_alternative()  # "text=Menu button" becomes main, Menu goes to the backups
     dialog.screen_box.setChecked(False)
+    assert dialog.agree.value() == 0 and dialog.agree.text() == "Auto"
+    dialog.agree.setValue(3)
+    from PySide6.QtCore import Qt
+
+    image_rows = [i for i in range(dialog.alternatives.list.count())
+                  if dialog.alternatives.list.item(i).data(Qt.UserRole)[0] == "image"]
+    assert image_rows and not dialog.alternatives.list.item(image_rows[0]).icon().isNull()  # thumbnail shown
     dialog._accept()
+    assert dialog.result_step["min_agree"] == 3
     assert dialog.result_step["target"]["desc"] == "Menu" and "verify" not in dialog.result_step
     assert dialog.result_step["check_screen"] is False and dialog.result_step["screen"]
     assert dialog.result_step["locator_type"] == "text"

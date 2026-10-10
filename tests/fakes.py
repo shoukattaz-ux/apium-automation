@@ -51,6 +51,7 @@ class FakeSession(DeviceSession):
         self.attrs = {}    # locator -> attributes of the element it matches (class, text, bounds...)
         self.matches = {}  # locator -> list of attribute dicts, when it matches several elements
         self.package = "com.fake"
+        self.shot = None   # PNG returned by screenshot_png (default: a tiny gray image)
 
     def _element(self, locator_type, locator_value):
         self._require_driver()
@@ -115,7 +116,7 @@ class FakeSession(DeviceSession):
 
     def screenshot_png(self):
         self._require_driver()
-        return tiny_png()
+        return self.shot or tiny_png()
 
     def page_source(self):
         self._require_driver()
@@ -136,8 +137,11 @@ class FakeSession(DeviceSession):
             return [Candidate((key, i), dict(a)) for i, a in enumerate(self.matches[key])]
         return [Candidate(key, dict(self.attrs.get(key, {})))]
 
-    def bounds_of(self, candidate):
-        return candidate.attrs.get("bounds", "")
+    def begin_pass(self):
+        pass  # elements come from ``screen``/``attrs``/``matches``, not a layout snapshot
+
+    def screenshot_for_pass(self):
+        return self.screenshot_png()
 
     def click_candidate(self, candidate):
         handle = candidate.handle

@@ -415,7 +415,7 @@ def test_backup_locators_are_tried_in_order():
     assert not result.skipped_steps
 
     step = {"action": "click", "locator_type": "android uiautomator",
-            "locator_value": "/android.widget.FrameLayout/android.view.ViewGroup[2]"}
+            "locator_value": "/hierarchy/android.widget.FrameLayout/android.view.ViewGroup[2]"}
     assert "XPath" in validate_step(step)["locator_value"]
     assert "XPath" in validate_step({"action": "click", "locator_type": "xpath", "locator_value": "//a",
                                      "alternatives": [{"locator_type": "id", "locator_value": "(//a)[1]"}]}
