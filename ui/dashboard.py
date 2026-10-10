@@ -50,6 +50,7 @@ class Bridge(QObject):
     status = Signal(str, dict)                 # serial, status entry
     devices_scanned = Signal(list, dict, str)  # serials, {serial: model}, error
     appium_checked = Signal(bool)
+    update_checked = Signal(object, str, bool)  # release or None, error, manual
     run_finished = Signal(list)                # serials
 
 
@@ -180,6 +181,7 @@ class MainWindow(QMainWindow):
         self.bridge.status.connect(self._apply_status)
         self.bridge.devices_scanned.connect(self._apply_scan)
         self.bridge.appium_checked.connect(self._apply_appium_state)
+        self.bridge.update_checked.connect(self._apply_update_check)
         self.bridge.run_finished.connect(lambda _: self.history.reload())
         self.manager.add_log_listener(lambda serial, msg: safe_emit(self.bridge.log, serial, msg))
         self.manager.status.subscribe(lambda serial, entry: safe_emit(self.bridge.status, serial, entry))
@@ -256,6 +258,8 @@ class MainWindow(QMainWindow):
         action("settings", "&Settings…", "⚙  Settings", "Default timeout, log folder, Appium URL, version",
                self.open_settings, "Ctrl+,")
         action("guide", "&User Guide", "Guide", "Open the setup and usage guide", self.open_guide)
+        action("updates", "Check for &Updates…", "Updates", "Look for a newer version and install it",
+               lambda: self.check_for_updates(manual=True))
         action("about", "&About", "About", "Version information", self.show_about)
         action("quit", "&Quit", "Quit", "Close the app", self.close, "Ctrl+Q")
 
@@ -265,7 +269,7 @@ class MainWindow(QMainWindow):
             ("&File", ["new", "edit", None, "configs", "logs", None, "settings", None, "quit"]),
             ("&Devices", ["refresh", "wireless", None, "run", "start_all", "stop_all"]),
             ("&Tools", ["picker", "schedules"]),
-            ("&Help", ["guide", "logs", None, "about"]),
+            ("&Help", ["guide", "updates", "logs", None, "about"]),
         )
         for title, keys in menus:
             menu = self.menuBar().addMenu(title)
@@ -760,6 +764,38 @@ class MainWindow(QMainWindow):
             if candidate.exists():
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(candidate)))
                 return
+
+    # ------------------------------------------------------------------ updates
+
+    def check_for_updates(self, manual: bool = False) -> None:
+        """Ask GitHub for a newer release on a background thread; offer it when there is one."""
+        from core import updater
+
+        def work() -> None:
+            try:
+                safe_emit(self.bridge.update_checked, updater.check(), "", manual)
+            except updater.UpdateError as exc:
+                safe_emit(self.bridge.update_checked, None, str(exc), manual)
+            except Exception as exc:  # never let an update check disturb the app
+                log.exception("Update check failed")
+                safe_emit(self.bridge.update_checked, None, f"Update check failed: {exc}", manual)
+
+        threading.Thread(target=work, name="update-check", daemon=True).start()
+
+    def _apply_update_check(self, release, error: str, manual: bool) -> None:
+        from .update_dialog import UpdateDialog, show_check_result
+
+        def open_dialog(found) -> None:
+            UpdateDialog(self, found, busy=lambda: bool(self.manager.running_serials()),
+                         quit_app=self._quit_for_update).exec()
+
+        show_check_result(self, release, error, manual, open_dialog)
+
+    def _quit_for_update(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        self.close()
+        QApplication.quit()
 
     def show_about(self) -> None:
         QMessageBox.about(self, f"About {APP_NAME}",

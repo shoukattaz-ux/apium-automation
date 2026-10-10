@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QVBoxLayout,
 )
 
@@ -95,6 +95,11 @@ class SettingsDialog(QDialog):
         version = QLabel(f"<b>{APP_NAME}</b> &nbsp; version {APP_VERSION}")
         version.setTextFormat(Qt.RichText)
         about_form.addRow("App", version)
+        self.check_updates = QCheckBox("Check for updates when the app starts")
+        self.check_updates.setChecked(self.original.check_updates)
+        self.check_updates.setToolTip("Looks for a newer release on GitHub and offers to install it. "
+                                      "You can also use Help → Check for Updates at any time.")
+        about_form.addRow("Updates", self.check_updates)
         about_form.addRow("Components", QLabel(
             f"Python {platform.python_version()} · PySide6 {_version('PySide6')} · "
             f"Appium client {_version('Appium-Python-Client')}"))
@@ -130,7 +135,9 @@ class SettingsDialog(QDialog):
         chosen = Path(self.log_dir.text())
         log_dir = "" if chosen == paths.default_logs_dir() else str(chosen)
         return app_settings.Settings(default_timeout_seconds=self.timeout.value(), log_dir=log_dir,
-                                     appium_url=self.appium_url.text().strip())
+                                     appium_url=self.appium_url.text().strip(),
+                                     check_updates=self.check_updates.isChecked(),
+                                     skipped_version=self.original.skipped_version)
 
     def _save(self) -> None:
         new = self.result_settings()

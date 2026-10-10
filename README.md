@@ -199,12 +199,28 @@ desktop shortcut, keeps user scripts across upgrades, and its uninstaller asks
 whether to also delete scripts, logs and run history. Without Inno Setup, zip
 `dist\DeviceAutomation` to share the portable folder.
 
+### Releases and auto-update
+
+Every push to `main` is a release. The **Build** workflow stamps the version
+(`major.minor` from `core/version.py` plus the run number, e.g. `1.2.57`), runs
+the tests, builds the app and installer, runs the packaged app's self-test and
+an upgrade test, and only then publishes a GitHub Release with
+`DeviceAutomation-Setup.exe` and its SHA-256 checksum. The newest installer is
+always at
+`https://github.com/shoukattaz-ux/apium-automation/releases/latest/download/DeviceAutomation-Setup.exe`.
+
+Installed copies check for a newer release at startup (Settings → "Check for
+updates when the app starts") and from **Help → Check for Updates**. Installing
+downloads the installer, verifies it against the checksum, runs it silently
+(scripts, pictures, schedules and settings are kept) and restarts the app. It
+never updates while a script is running. The repository must stay public for
+copies to see releases. Logic: `core/updater.py`, `ui/update_dialog.py`.
+
 No Windows machine? The **Build** GitHub Actions workflow
 (`.github/workflows/build.yml`) runs the tests and builds the app and the
 installer on GitHub's Windows runners for every push and pull request.
-Download them from the run's **Artifacts**. Pushes to `main`, manual runs
-and version tags also bundle Appium, Node and adb. Pushing a tag such as
-`v1.1.0` publishes a GitHub Release with the installer attached.
+Download them from the run's **Artifacts**. Pushes to `main` and manual runs
+also bundle Appium, Node and adb.
 
 The version lives only in `core/version.py`; the .exe properties, About box and
 installer name pick it up. `python packaging/make_icon.py` regenerates the

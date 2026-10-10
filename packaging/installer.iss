@@ -1,7 +1,7 @@
 ; Inno Setup script: wraps the PyInstaller one-folder build into a Windows installer.
 ;
 ; Build the app first (packaging\build.bat does both steps), then:
-;     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=1.1.0 packaging\installer.iss
+;     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=1.2.0 packaging\installer.iss
 ; Output: dist\installer\DeviceAutomation-Setup-<version>.exe
 ;
 ; Installs per-user by default (no admin prompt) into %LOCALAPPDATA%\Programs, where
@@ -14,7 +14,7 @@
 #define AppDataFolder "DeviceAutomation"
 #define DistDir "..\dist\DeviceAutomation"
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.2.0"
 #endif
 
 [Setup]
@@ -66,6 +66,8 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; The in-app updater installs silently with /RELAUNCH=1: start the app again when done.
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: RelaunchRequested
 
 [UninstallDelete]
 ; Created at runtime by Python/Qt; always safe to remove.
@@ -87,6 +89,11 @@ begin
        '-NoProfile -ExecutionPolicy Bypass -Command "Get-Process adb,node -ErrorAction SilentlyContinue | ' +
        'Where-Object { $_.Path -like ''' + AppDir + '\*'' } | Stop-Process -Force"',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function RelaunchRequested: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
