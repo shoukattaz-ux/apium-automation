@@ -300,6 +300,13 @@ class StepDialog(QDialog):
                 box.setSuffix(" s")
             elif "%" in spec.label:
                 box.setSuffix(" %")
+            if not spec.required and spec.default is None:
+                # Optional with no default: one step below the range means "not set".
+                box.setMinimum(float(spec.minimum or 0) - 1)
+                box.setSpecialValueText("Off")
+                box.setProperty("optional_unset", True)
+                box.setValue(float(value) if value not in (None, "") else box.minimum())
+                return box
             box.setValue(float(value) if value not in (None, "") else 0.0)
             return box
         if spec.name in ("value_from", "device"):
@@ -320,6 +327,8 @@ class StepDialog(QDialog):
         if isinstance(widget, QComboBox):
             return widget.currentText().strip()
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+            if widget.property("optional_unset") and widget.value() == widget.minimum():
+                return ""
             return widget.value()
         return widget.text().strip()
 

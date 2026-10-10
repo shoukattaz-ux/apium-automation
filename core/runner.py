@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from .devices import DeviceError, DeviceSession, RunStopped
+from .devices import DeviceError, DeviceSession, ElementNotFound, RunStopped
 from .history import RunRecorder, StepRecord
 from .settings import default_timeout
 from .schema import (
@@ -401,7 +401,15 @@ class ScriptRunner:
         elif action == "close_app":
             session.close_app(value("package"))
         elif action == "click":
-            session.click(*locator, timeout_seconds=timeout)
+            fallback = step.get("fallback_x"), step.get("fallback_y")
+            try:
+                session.click(*locator, timeout_seconds=timeout)
+            except ElementNotFound:
+                if None in fallback:
+                    raise
+                self.log(f"    ⚠ element not found — tapped its saved position "
+                         f"({float(fallback[0]):g}%, {float(fallback[1]):g}%)", session)
+                session.tap_percent(*fallback)
         elif action == "wait_for_element":
             session.wait_for_element(*locator, timeout_seconds=timeout)
         elif action == "copy_text":

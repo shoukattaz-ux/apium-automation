@@ -134,6 +134,12 @@ def test_nested_builder_cards_and_step_dialog(app, configs, window_factory):
     dialog.inputs["retries"].setValue(2)
     dialog._accept()
     assert dialog.result_step["retries"] == 2
+    assert "fallback_x" not in dialog.result_step  # optional number left empty stays off
+    dialog = StepDialog(editor, step={"action": "click", "locator_type": "id", "locator_value": "x",
+                                      "fallback_x": 50, "fallback_y": 12.5})
+    assert dialog.inputs["fallback_x"].value() == 50
+    dialog._accept()
+    assert (dialog.result_step["fallback_x"], dialog.result_step["fallback_y"]) == (50, 12.5)
 
     builder.duplicate_step(builder.steps, 0)
     builder.move_step(builder.steps[0]["then"], 0, 1)  # no-op, single child

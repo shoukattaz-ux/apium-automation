@@ -106,8 +106,13 @@ ACTIONS: dict[str, ActionSpec] = {
             FieldSpec("package", "App package ID", "text", templated=True),
         ), group="Apps", description="Force-stop an app"),
         # ---- elements
-        ActionSpec("click", "Click", _locator() + (_timeout(),), group="Elements",
-                   description="Tap a button, field or item"),
+        ActionSpec("click", "Click", _locator() + (
+            _timeout(),
+            FieldSpec("fallback_x", "If not found, tap at X %", "float", required=False, minimum=0, maximum=100,
+                      help="Backup position (percent of screen) tapped when the element isn't found. "
+                           "Filled in by the Element Picker; clear both to turn off."),
+            FieldSpec("fallback_y", "If not found, tap at Y %", "float", required=False, minimum=0, maximum=100),
+        ), group="Elements", description="Tap a button, field or item"),
         ActionSpec("wait_for_element", "Wait For Element", _locator() + (_timeout(required=True),),
                    group="Elements", description="Wait until something appears on screen"),
         ActionSpec("copy_text", "Copy Text", _locator() + (
@@ -294,6 +299,9 @@ def validate_step(step: dict) -> dict[str, str]:
 
     if action == "paste_text" and not step.get("value_from") and not step.get("text"):
         errors["value_from"] = "Choose a variable to paste, or enter text to type"
+    if action == "click" and (step.get("fallback_x") is None) != (step.get("fallback_y") is None):
+        errors["fallback_y" if step.get("fallback_y") is None else "fallback_x"] = \
+            "Set both X and Y for the backup tap, or neither"
     return errors
 
 

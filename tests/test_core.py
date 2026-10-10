@@ -335,3 +335,53 @@ def test_bundled_examples_are_valid():
     assert len(entries) >= 2
     for entry in entries:
         load_script(entry.path)
+
+
+FB_LITE_TABS = """<?xml version='1.0' encoding='UTF-8'?>
+<hierarchy index="0" rotation="0" width="400" height="800">
+  <android.widget.FrameLayout bounds="[0,0][400,800]">
+    <android.view.ViewGroup bounds="[0,0][400,60]">
+      <android.view.ViewGroup clickable="true" bounds="[0,0][100,60]">
+        <android.view.View content-desc="Home" bounds="[30,10][70,50]"/>
+      </android.view.ViewGroup>
+      <android.view.ViewGroup clickable="true" bounds="[100,0][200,60]">
+        <android.view.ViewGroup bounds="[110,5][190,55]">
+          <android.view.View content-desc="Video" bounds="[130,10][170,50]"/>
+        </android.view.ViewGroup>
+      </android.view.ViewGroup>
+    </android.view.ViewGroup>
+  </android.widget.FrameLayout>
+</hierarchy>"""
+
+
+def test_unlabelled_element_is_found_through_its_labelled_child():
+    import xml.etree.ElementTree as ET
+
+    elements = parse_page_source(FB_LITE_TABS)
+    tab = next(e for e in elements if e.bounds == (100, 0, 200, 60))
+    suggestions = suggest_locators(tab, elements)
+    best = suggestions[0]
+    assert best == best_locator(tab, elements)
+    assert best.locator_value == '//*[@content-desc="Video"]/../..' and not best.fragile
+    assert suggestions[-1].fragile and suggestions[-1].locator_value == tab.xpath
+    # The anchored path really points at the tab.
+    root = ET.fromstring(FB_LITE_TABS.split("?>", 1)[1])
+    found = root.findall(".//*[@content-desc='Video']/../..")
+    assert [n.attrib["bounds"] for n in found] == ["[100,0][200,60]"]
+
+
+def test_click_falls_back_to_saved_position():
+    session = FakeSession("S1", screen={})
+    lines = []
+    script = {"name": "fallback", "steps": [
+        {"action": "click", "locator_type": "xpath", "locator_value": "//gone", "timeout_seconds": 0,
+         "fallback_x": 50, "fallback_y": 25},
+        {"action": "click", "locator_type": "xpath", "locator_value": "//gone", "timeout_seconds": 0},
+    ]}
+    result = ScriptRunner(session, script, on_log=lambda *args: lines.append(str(args[-1]))).run()
+    assert ("tap", 200, 200) in session.calls  # 50% × 400, 25% × 800
+    assert any("tapped its saved position (50%, 25%)" in line for line in lines)
+    assert len(result.skipped_steps) == 1  # the step without a fallback is still skipped
+
+    assert validate_step({"action": "click", "locator_type": "id", "locator_value": "x", "fallback_x": 5}) == {
+        "fallback_y": "Set both X and Y for the backup tap, or neither"}

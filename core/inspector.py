@@ -75,6 +75,7 @@ class LocatorSuggestion:
     locator_type: str
     locator_value: str
     matches: int  # how many elements on screen it matches
+    fragile: bool = False  # positional path: breaks when the layout shifts (scrolling, new items)
 
     @property
     def unique(self) -> bool:
@@ -166,10 +167,40 @@ def suggest_locators(element: UiElement, elements: list[UiElement]) -> list[Loca
             position = same_id.index(element) + 1
             xpath = f"(//*[@resource-id={_xpath_literal(element.resource_id)}])[{position}]"
             suggestions.append(LocatorSuggestion("xpath", xpath, 1))
-    suggestions.append(LocatorSuggestion("xpath", element.xpath, 1))
+    anchored = _anchored_xpath(element, elements)
+    if anchored:
+        suggestions.append(anchored)
+    suggestions.append(LocatorSuggestion("xpath", element.xpath, 1, fragile=True))
 
-    # Unique first, keeping the robustness order within each group.
-    return sorted(suggestions, key=lambda s: not s.unique)
+    # Unique and stable first, keeping the robustness order within each group.
+    return sorted(suggestions, key=lambda s: (not s.unique, s.fragile))
+
+
+def _anchored_xpath(element: UiElement, elements: list[UiElement]) -> LocatorSuggestion | None:
+    """For an element with no id/text of its own, find it through a labelled child.
+
+    Apps like Facebook Lite draw tabs and buttons as plain ViewGroups whose only
+    identifying detail is a child's text or content-desc, e.g. the Video tab is
+    the parent of ``content-desc="Video"``. ``//*[@content-desc="Video"]/..``
+    survives scrolling and new feed items, unlike a positional path.
+    """
+    if element.resource_id or element.content_desc or element.text:
+        return None
+    descendants: list[UiElement] = []
+    pending = list(element.children)
+    while pending:
+        node = pending.pop(0)  # breadth-first: the nearest label wins
+        descendants.append(node)
+        pending.extend(node.children)
+    for node in descendants:
+        for attr, value in (("content-desc", node.content_desc), ("text", node.text)):
+            if not value:
+                continue
+            if sum(1 for e in elements if e.attrs.get(attr) == value) != 1:
+                continue
+            ups = "/.." * (node.depth - element.depth)
+            return LocatorSuggestion("xpath", f"//*[@{attr}={_xpath_literal(value)}]{ups}", 1)
+    return None
 
 
 def best_locator(element: UiElement, elements: list[UiElement]) -> LocatorSuggestion:

@@ -325,6 +325,8 @@ class InspectorWindow(QWidget):
                 self.table.setItem(row, 1, QTableWidgetItem(value))
         for suggestion in suggest_locators(element, self.elements):
             badge = "✓ unique" if suggestion.unique else f"matches {suggestion.matches}"
+            if suggestion.fragile:
+                badge += " · fragile: breaks if the screen scrolls or changes"
             item = QListWidgetItem(f"{suggestion.locator_type}  =  {suggestion.locator_value}     [{badge}]")
             item.setData(Qt.UserRole, (suggestion.locator_type, suggestion.locator_value))
             self.locators.addItem(item)
@@ -341,6 +343,8 @@ class InspectorWindow(QWidget):
 
     def _step_for(self, action: str, locator: tuple[str, str]) -> dict:
         step: dict = {"action": action, "locator_type": locator[0], "locator_value": locator[1]}
+        if action == "click":
+            step.update(self._fallback_position())
         if action == "copy_text":
             step["save_as"] = "copied_value"
         elif action == "paste_text":
@@ -356,6 +360,15 @@ class InspectorWindow(QWidget):
             for child in step.get("then", []):
                 child["device"] = self._role()
         return step
+
+    def _fallback_position(self) -> dict:
+        """The selected element's centre as percent of the screen, as a Click step's backup tap."""
+        pixmap = self.screen.pixmap
+        if self.selected is None or pixmap is None or pixmap.isNull():
+            return {}
+        left, top, right, bottom = self.selected.bounds
+        return {"fallback_x": round((left + right) / 2 / pixmap.width() * 100, 1),
+                "fallback_y": round((top + bottom) / 2 / pixmap.height() * 100, 1)}
 
     def _add_step(self, action: str) -> None:
         locator = self.current_locator()

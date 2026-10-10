@@ -27,7 +27,9 @@ others.
 - **Element Picker & Recorder** — a live screenshot of the phone: hover and
   click an element to see its attributes and the best locator (unique ones
   first), add it as a step, or turn on **Record clicks** to build a script by
-  using the app.
+  using the app. Unlabelled buttons are found through a labelled child
+  (`//*[@content-desc="Video"]/..`), positional paths are flagged as fragile,
+  and recorded clicks keep a backup tap position.
 - **Repeat runs** — run N times or until stopped, with a pause between runs.
 - **Schedules** — run scripts daily at set times on chosen weekdays, or every N
   minutes. Busy or unplugged phones are skipped and logged.
@@ -120,7 +122,8 @@ The Appium URL defaults to `http://127.0.0.1:4723`; override it with
 | Action | Fields |
 | --- | --- |
 | `open_app`, `close_app` | `package` |
-| `click`, `wait_for_element` | locator, `timeout_seconds` |
+| `click` | locator, `timeout_seconds`, optional `fallback_x`/`fallback_y` (percent): tapped if the element isn't found |
+| `wait_for_element` | locator, `timeout_seconds` |
 | `copy_text` | locator, `save_as` |
 | `paste_text` | locator, `value_from` (variable) or `text` (with `{{placeholders}}`) |
 | `scroll` | `direction` (up/down/left/right), `times` |
