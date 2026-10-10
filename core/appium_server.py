@@ -137,6 +137,8 @@ class AppiumServer:
         parsed = urlparse(self.url)
         command += ["--address", parsed.hostname or "127.0.0.1", "--port", str(parsed.port or 4723)]
         logs_dir().mkdir(parents=True, exist_ok=True)
+        if self._log_file:  # from a previous run of the server that has since stopped
+            self._log_file.close()
         self._log_file = open(Path(logs_dir()) / "appium-server.log", "a", encoding="utf-8")
         log.info("Starting Appium: %s", " ".join(command))
         try:
@@ -175,3 +177,51 @@ class AppiumServer:
         if self._log_file:
             self._log_file.close()
             self._log_file = None
+
+
+class AppiumWatchdog:
+    """Restarts the Appium server if it stops while the app is open.
+
+    The dashboard checks the server every few seconds; when it stops answering and
+    an Appium install is available (bundled or on PATH), ``restart`` starts it again,
+    at most once every RESTART_INTERVAL seconds so a server that keeps crashing isn't
+    relaunched in a tight loop (its reason is in logs/appium-server.log).
+    """
+
+    RESTART_INTERVAL = 30.0
+
+    def __init__(self, url: str = DEFAULT_APPIUM_URL, server: AppiumServer | None = None):
+        self.url = url
+        self.server = server
+        self.restarts = 0
+        self._last_attempt: float | None = None
+        self._busy = False
+
+    def can_restart(self) -> bool:
+        return find_appium_command() is not None
+
+    def due(self) -> bool:
+        return not self._busy and (self._last_attempt is None
+                                   or time.monotonic() - self._last_attempt >= self.RESTART_INTERVAL)
+
+    def restart(self, wait_seconds: float = START_TIMEOUT_SECONDS) -> bool:
+        """Start the server again (blocking). False if not due, not possible, or it didn't come up."""
+        if not self.due() or not self.can_restart():
+            return False
+        self._busy = True
+        self._last_attempt = time.monotonic()
+        try:
+            if self.server is None:
+                self.server = AppiumServer(self.url)
+            self.restarts += 1
+            log.warning("Appium server stopped answering; restarting it (restart %d)", self.restarts)
+            ok = self.server.start(wait_seconds)
+            (log.info if ok else log.error)("Appium %s", "is back" if ok else
+                                             "did not come back; see logs/appium-server.log")
+            return ok
+        finally:
+            self._busy = False
+
+    def stop(self) -> None:
+        if self.server:
+            self.server.stop()

@@ -306,7 +306,10 @@ def run_gui(appium_url: str) -> int:
     splash.step("Checking the Appium server…", 35)
     server = ensure_appium(app, appium_url, splash)
     splash.step("Preparing the dashboard…", 60)
-    window = MainWindow(DeviceManager(appium_url), schedules=schedules)
+    from core.appium_server import AppiumWatchdog
+
+    watchdog = AppiumWatchdog(appium_url, server)
+    window = MainWindow(DeviceManager(appium_url), schedules=schedules, appium_watchdog=watchdog)
     splash.wait_until(lambda: window.scans_completed > 0, timeout=8, message="Scanning for phones…",
                       start=70, end=100)
     found = len(window.connected_devices())
@@ -320,8 +323,7 @@ def run_gui(appium_url: str) -> int:
         return app.exec()
     finally:
         close_all_windows(app)  # finish pending deletes before Python tears Qt down
-        if server:
-            server.stop()
+        watchdog.stop()  # stops the server we started (at launch or after a restart)
         log.info("%s closed", APP_NAME)
 
 

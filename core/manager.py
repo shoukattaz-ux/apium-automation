@@ -175,6 +175,20 @@ class DeviceManager:
         if session:
             session.close()
 
+    def drop_all_sessions(self) -> None:
+        """Forget every session (e.g. the Appium server stopped): the next use opens a fresh one.
+
+        Closing a session whose server is gone can take a few seconds, so that happens
+        on a background thread.
+        """
+        with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        if sessions:
+            log.info("Dropping %d Appium session(s)", len(sessions))
+            threading.Thread(target=lambda: [s.close() for s in sessions], name="drop-sessions",
+                             daemon=True).start()
+
     def shutdown(self, timeout: float = 5.0) -> None:
         self.stop_all()
         with self._lock:

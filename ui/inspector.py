@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
 )
 
 from core import paths
-from core.devices import DeviceError
+from core.appium_server import is_server_running
+from core.devices import DeviceError, connection_lost, friendly_error
 from core.inspector import UiElement, clickable_target, element_at, parse_page_source, suggest_locators
 from core.targeting import fingerprint, layout_size, screen_signature
 
@@ -267,13 +268,26 @@ class InspectorWindow(QWidget):
         manager = self.dashboard.manager
 
         def work() -> None:
-            try:
-                session = manager.session_for(serial)
-                png = session.screenshot_png()
-                source = session.page_source()
-                safe_emit(self.signals.loaded, png, source, "")
-            except Exception as exc:  # DeviceError or a WebDriver error
-                safe_emit(self.signals.loaded, b"", "", str(exc).splitlines()[0] if str(exc) else type(exc).__name__)
+            for attempt in (1, 2):
+                try:
+                    session = manager.session_for(serial)
+                    png = session.screenshot_png()
+                    source = session.page_source()
+                    safe_emit(self.signals.loaded, png, source, "")
+                    return
+                except Exception as exc:  # DeviceError or a WebDriver error
+                    if connection_lost(exc) and attempt == 1:
+                        # The session died (Appium restarted or stopped): reconnect once, then retry.
+                        log.info("Picker lost its Appium session for %s; reconnecting", serial)
+                        manager.drop_session(serial)
+                        if is_server_running(manager.appium_url):
+                            continue
+                        message = ("The Appium server isn't running. The app is restarting it — "
+                                   "press Refresh again in a moment.")
+                    else:
+                        message = friendly_error(exc)
+                    safe_emit(self.signals.loaded, b"", "", message)
+                    return
 
         threading.Thread(target=work, name="inspector", daemon=True).start()
 

@@ -7,29 +7,9 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
-
-from core import paths  # noqa: E402
-from core.manager import DeviceManager  # noqa: E402
 from core.runner import RunState  # noqa: E402
-from core.scheduler import Schedule, ScheduleStore  # noqa: E402
+from core.scheduler import Schedule  # noqa: E402
 from tests.fakes import FakeSession  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def app():
-    from ui.theme import apply_theme
-
-    application = QApplication.instance() or QApplication([])
-    apply_theme(application)
-    return application
-
-
-@pytest.fixture
-def configs(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths, "app_dir", lambda: tmp_path)
-    (tmp_path / "configs" / "scripts").mkdir(parents=True)
-    return tmp_path / "configs"
 
 
 def wait_for(app, condition, timeout=5.0):
@@ -41,27 +21,6 @@ def wait_for(app, condition, timeout=5.0):
         time.sleep(0.02)
     return False
 
-
-@pytest.fixture
-def window_factory(app, configs, monkeypatch):
-    import ui.dashboard as dashboard
-
-    monkeypatch.setattr(dashboard, "is_server_running", lambda url: True)
-    created = []
-
-    def make(sessions, models=None):
-        manager = DeviceManager(session_factory=lambda serial, url: sessions[serial])
-        window = dashboard.MainWindow(manager, scan_devices=False, schedules=ScheduleStore(configs / "schedules.json"))
-        window.appium_timer.stop()
-        window._apply_scan(list(sessions), models or {s: f"Phone {s}" for s in sessions}, "")
-        created.append(window)
-        return window
-
-    yield make
-    for window in created:
-        window.manager.shutdown()
-        for child in list(window._windows):
-            child.close()
 
 
 def test_builder_script_runs_per_device_and_lands_in_history(app, configs, window_factory):

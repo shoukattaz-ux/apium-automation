@@ -160,8 +160,25 @@ class LocalHandle:
     bounds: str
 
 
-def _looks_lost(exc: Exception) -> bool:
-    return type(exc).__name__ in {"InvalidSessionIdException", "MaxRetryError", "NewConnectionError"}
+def connection_lost(exc: BaseException) -> bool:
+    """True when an error means the Appium server or its session is gone (not just one bad step):
+    the server stopped (connection refused) or dropped the session (e.g. after it restarted)."""
+    name = type(exc).__name__
+    text = str(exc)
+    return (name in {"InvalidSessionIdException", "NoSuchDriverException", "MaxRetryError",
+                     "NewConnectionError", "ConnectionError", "ConnectionRefusedError"}
+            or "session is either terminated or not started" in text
+            or "Connection refused" in text or "actively refused" in text
+            or "Max retries exceeded" in text or "invalid session id" in text.lower())
+
+
+def friendly_error(exc: BaseException) -> str:
+    """A one-line message for the UI (connection problems explained instead of a raw traceback line)."""
+    if connection_lost(exc):
+        return "Lost the connection to the Appium server. The app reconnects automatically; try again in a moment."
+    text = str(exc).strip() or type(exc).__name__
+    return text.splitlines()[0].removeprefix("Message: ")
+
 
 
 class DeviceSession:
@@ -402,7 +419,7 @@ class DeviceSession:
         try:
             self._screen = LocalScreen(self.page_source())
         except Exception as exc:  # unreadable layout: fall back to asking the phone per locator
-            if _looks_lost(exc):
+            if connection_lost(exc):
                 raise
             log.debug("Layout snapshot failed: %s", exc)
 

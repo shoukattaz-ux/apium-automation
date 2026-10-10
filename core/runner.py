@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from .devices import DeviceError, DeviceSession, ElementNotFound, RunStopped
+from .devices import DeviceError, DeviceSession, ElementNotFound, RunStopped, connection_lost
 from .history import RunRecorder, StepRecord
 from .inspector import element_at, parse_page_source
 from . import paths
@@ -823,11 +823,7 @@ def _first_line(exc: BaseException) -> str:
 
 def _session_lost(exc: BaseException) -> bool:
     """True for errors meaning the Appium session/device is gone, not just one bad step."""
-    name = type(exc).__name__
-    text = str(exc)
-    return (name in {"InvalidSessionIdException", "MaxRetryError", "NewConnectionError", "ConnectionError"}
-            or "session is either terminated or not started" in text
-            or "Connection refused" in text)
+    return connection_lost(exc)
 
 
 # --------------------------------------------------------------------- repeated runs
