@@ -164,8 +164,7 @@ def test_run_dialog_starts_cross_phone_workflow(app, configs, window_factory):
     assert set(dialog.picker.role_combos) == {"A", "B"}
     assert dialog.picker.mapping() == {"A": "P1", "B": "P2"}
     dialog.picker.role_combos["B"].setCurrentIndex(dialog.picker.role_combos["B"].findData("P1"))
-    dialog._accept()
-    assert dialog.result_request is None and "different phone" in dialog.error.text()
+    assert dialog.picker.problems() == []  # one phone may play several roles
     dialog.picker.role_combos["B"].setCurrentIndex(dialog.picker.role_combos["B"].findData("P2"))
     dialog.repeat.setValue(2)
     dialog._accept()
@@ -191,6 +190,16 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     inspector._click(100, 70)
     assert inspector.selected.text == "Order 1234"
     assert inspector.current_locator() == ("id", "com.shop:id/order")
+    inspector.locators.setCurrentRow(inspector.locators.count() - 1)  # highlight the fragile full path
+    inspector._add_step("click")
+    fragile_pick = editor.builder.steps.pop()
+    assert fragile_pick["locator_value"] == "com.shop:id/order"  # a stable locator stays the main one
+    tail = [alt["locator_value"] for alt in fragile_pick["alternatives"][-2:]]  # fragile ones last
+    assert tail[0].startswith("/android.widget.FrameLayout") and ".instance(" in tail[1]
+    inspector.locators.setCurrentRow(1)  # a stable one is honoured as main
+    inspector._add_step("click")
+    assert editor.builder.steps.pop()["locator_type"] == "text"
+    inspector.locators.setCurrentRow(0)
     inspector._add_step("copy_text")
     assert editor.builder.steps[-1]["action"] == "copy_text"
 
@@ -310,4 +319,37 @@ def test_developer_mode_runs_and_saves(app, configs, window_factory):
     assert (configs / "scripts" / "dev_test.py").exists()
     window.reload_scripts()
     assert window.rows["A1"].script_combo.findText("dev_test  [Developer Script]") >= 0
+    editor.close()
+
+
+def test_step_names_and_roles_to_names(app, configs, window_factory):
+    from core.schema import describe_step, roles_to_titles
+    from ui.script_editor import ScriptEditorWindow, StepDialog
+
+    window = window_factory({})
+    editor = ScriptEditorWindow(window)
+    editor.builder.steps = [
+        {"action": "click", "locator_type": "text", "locator_value": "Video", "device": "video tab"},
+        {"action": "repeat", "times": 2, "device": "loop", "steps": [
+            {"action": "press_key", "key": "back", "device": "go back", "title": "Back"}]},
+        {"action": "wait", "seconds": 1},
+    ]
+    editor.builder.render()
+    assert editor.builder.roles_button.isVisibleTo(editor)
+    changed = roles_to_titles(editor.builder.steps)
+    editor.builder.render()
+    assert changed == 3 and not editor.builder.roles()
+    assert not editor.builder.roles_button.isVisibleTo(editor)
+    assert editor.builder.steps[0]["title"] == "video tab" and "device" not in editor.builder.steps[0]
+    assert editor.builder.steps[1]["steps"][0]["title"] == "Back (go back)"
+    assert describe_step(editor.builder.steps[0]) == "video tab — Click text=Video"
+
+    # Step name is the first field, saved with the step; the dialog never outgrows the screen.
+    dialog = StepDialog(editor, step=editor.builder.steps[0])
+    assert dialog.inputs["title"].text() == "video tab"
+    dialog.inputs["title"].setText("Open Video tab")
+    dialog._accept()
+    assert dialog.result_step["title"] == "Open Video tab"
+    screen = dialog.screen().availableGeometry().height()
+    assert dialog.height() <= screen
     editor.close()

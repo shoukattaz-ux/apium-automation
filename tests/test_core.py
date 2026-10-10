@@ -230,8 +230,6 @@ def test_manager_workflow_locks_phones_and_repeats(tmp_path):
     ]}
     with pytest.raises(ScriptError):
         manager.start("s1", script)  # needs a phone per role
-    with pytest.raises(ScriptError):
-        manager.start_workflow({"A": "s1", "B": "s1"}, script)
     assert manager.start_workflow({"A": "s1", "B": "s2"}, script, repeat=2)
     assert manager.is_running("s2")
     assert not manager.start("s2", SCRIPT)  # busy as part of the workflow
@@ -240,6 +238,14 @@ def test_manager_workflow_locks_phones_and_repeats(tmp_path):
     runs = list_runs(tmp_path)
     assert len(runs) == 2 and runs[0][1].devices == {"A": "s1", "B": "s2"}
     assert manager.status.get("s2")["state"] == RunState.COMPLETED
+
+    # One phone may play both roles: one session, steps in order.
+    phones["s1"].screen["id=in"] = ""
+    phones["s1"].calls.clear()
+    assert manager.start_workflow({"A": "s1", "B": "s1"}, script)
+    assert _wait_idle(manager, ["s1"])
+    assert ("paste", "id=in", "x") in phones["s1"].calls  # copied as role A, pasted as role B
+    assert manager.status.get("s1")["state"] == RunState.COMPLETED
 
 
 def test_manager_stop_ends_repeat_forever(tmp_path):

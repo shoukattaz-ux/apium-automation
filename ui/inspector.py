@@ -347,16 +347,23 @@ class InspectorWindow(QWidget):
         return self.role_combo.currentText().strip()
 
     def ranked_locators(self) -> list[tuple[str, str]]:
-        """The highlighted locator, then every other unique one in robustness order."""
-        chosen = self.current_locator()
-        ranked = [(s.locator_type, s.locator_value) for s in self.suggestions if s.unique]
-        if chosen:
-            ranked = [chosen] + [loc for loc in ranked if loc != tuple(chosen)]
-        return ranked
+        """Every unique locator, stable before fragile, the highlighted one first within its group.
 
-    def _step_for(self, action: str, locator: tuple[str, str]) -> dict:
+        A fragile (positional) locator is never made the main one while a stable one exists,
+        even if it was highlighted: it would fail as soon as the screen scrolls or changes.
+        """
+        chosen = self.current_locator()
+        unique = [s for s in self.suggestions if s.unique]
+        if not unique and chosen:
+            return [chosen]
+        unique.sort(key=lambda s: (s.fragile, (s.locator_type, s.locator_value) != chosen))
+        return [(s.locator_type, s.locator_value) for s in unique]
+
+    def _step_for(self, action: str) -> dict:
+        """A step for the selected element: best locator as the main one, the rest as backups."""
+        ranked = self.ranked_locators()
+        locator, backups = ranked[0], ranked[1:]
         step: dict = {"action": action, "locator_type": locator[0], "locator_value": locator[1]}
-        backups = [loc for loc in self.ranked_locators() if loc != tuple(locator)]
         if backups:
             step["alternatives"] = [{"locator_type": t, "locator_value": v} for t, v in backups]
         if action == "click":
@@ -391,10 +398,9 @@ class InspectorWindow(QWidget):
                 "fallback_y": round(min(100.0, max(0.0, (top + bottom) / 2 / height * 100)), 1)}
 
     def _add_step(self, action: str) -> None:
-        locator = self.current_locator()
-        if not locator or not self.add_steps:
+        if not self.current_locator() or not self.add_steps:
             return
-        self.add_steps([self._step_for(action, locator)])
+        self.add_steps([self._step_for(action)])
         self.status.setText(f"Added {action.replace('_', ' ')} step")
 
     def _use_locator(self) -> None:
@@ -417,7 +423,7 @@ class InspectorWindow(QWidget):
         locator = self.current_locator()
         if not locator:
             return
-        self.add_steps([self._step_for("click", locator)])
+        self.add_steps([self._step_for("click")])
         serial = self.serial()
         manager = self.dashboard.manager
         self.status.setText("Clicking on the phone…")

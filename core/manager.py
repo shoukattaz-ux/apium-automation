@@ -110,9 +110,7 @@ class DeviceManager:
         missing = [role for role in roles if not mapping.get(role)]
         if missing:
             raise ScriptError(f"Choose a phone for: {', '.join(missing)}")
-        serials = [mapping[role] for role in roles]
-        if len(set(serials)) != len(serials):
-            raise ScriptError("Each role needs a different phone")
+        # One phone may play several roles: it gets one session, and the steps still run in order.
         return self._start({role: mapping[role] for role in roles}, script, repeat, delay_seconds, trigger)
 
     def _start(self, mapping: dict[str | None, str], script: Script, repeat: int, delay_seconds: float,

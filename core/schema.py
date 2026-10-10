@@ -176,8 +176,11 @@ ACTION_LABELS = {key: spec.label for key, spec in ACTIONS.items()}
 BLOCK_LABELS = {"steps": "Do", "then": "Then", "else": "Otherwise"}
 
 # Options every device step accepts (shown under "Advanced" in the builder).
-DEVICE_FIELD = FieldSpec("device", "Phone", "text", required=False,
-                         help="Empty = the default phone. Use A, B… to drive several phones")
+TITLE_FIELD = FieldSpec("title", "Step name", "text", required=False,
+                        help="Your name for this step, shown in the step list and the log, e.g. Open Video tab")
+DEVICE_FIELD = FieldSpec("device", "Phone role", "text", required=False,
+                         help="Leave empty for normal scripts. Only for one script that drives several "
+                              "phones at once (A, B…). To name the step, use Step name.")
 RETRIES_FIELD = FieldSpec("retries", "Retries", "int", required=False, default=0, minimum=0, maximum=20,
                           help="Extra attempts before the step counts as failed")
 ON_FAIL_FIELD = FieldSpec("on_fail", "If it fails", "choice", required=False, default="skip",
@@ -205,8 +208,8 @@ def fields_for(action: str) -> tuple[FieldSpec, ...]:
     """Action fields plus the common options that apply to it."""
     spec = ACTIONS[action]
     if not spec.uses_device:
-        return spec.fields
-    return spec.fields + COMMON_FIELDS
+        return (TITLE_FIELD,) + spec.fields
+    return (TITLE_FIELD,) + spec.fields + COMMON_FIELDS
 
 
 def render(text: Any, variables: dict[str, Any]) -> str:
@@ -245,6 +248,22 @@ def script_roles(script: dict) -> list[str]:
         if role and role not in roles:
             roles.append(role)
     return roles
+
+
+def roles_to_titles(steps: list[dict]) -> int:
+    """Turn each step's phone role into its step name (for scripts that used roles as labels).
+
+    Returns how many steps changed. An existing step name is kept and the role appended.
+    """
+    changed = 0
+    for _, step in iter_steps(steps):
+        role = str(step.pop("device", "") or "").strip()
+        if not role:
+            continue
+        title = str(step.get("title") or "").strip()
+        step["title"] = f"{title} ({role})" if title and role not in title else (title or role)
+        changed += 1
+    return changed
 
 
 def is_workflow(script: dict) -> bool:
@@ -409,8 +428,13 @@ def normalize_step(step: dict) -> dict:
     return clean
 
 
-def describe_step(step: dict) -> str:
-    """One-line human summary of a step, used on builder cards and in logs."""
+def describe_step(step: dict, with_title: bool = True) -> str:
+    """One-line human summary of a step, used on builder cards and in logs.
+
+    With ``with_title`` the user's step name leads, e.g. ``Open Video tab — Click text=Video``.
+    """
+    if with_title and str(step.get("title") or "").strip():
+        return f"{str(step['title']).strip()} — {describe_step(step, with_title=False)}"
     action = step.get("action")
     label = ACTION_LABELS.get(action, str(action))
     target = f"{step.get('locator_type')}={step.get('locator_value')}"

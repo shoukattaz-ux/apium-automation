@@ -24,7 +24,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QFontDatabase, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+    QApplication, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -33,7 +33,7 @@ from core.devices import DeviceError, list_installed_packages
 from core.settings import default_timeout
 from core.schema import (
     ACTION_LABELS, ACTIONS, BLOCK_LABELS, COMMON_FIELDS, DEFAULT_TIMEOUT_SECONDS, LOCATOR_ACTIONS, LOCATOR_TYPES,
-    FieldSpec, ScriptError, describe_step, format_path,
+    TITLE_FIELD, FieldSpec, ScriptError, describe_step, format_path, roles_to_titles,
     safe_filename, save_script, script_roles, script_variables, validate_script, validate_step,
 )
 
@@ -301,12 +301,22 @@ class StepDialog(QDialog):
         top.addRow("Action", self.action_combo)
         top.addRow("", self.action_help)
         top.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        # The fields scroll; Save / Cancel stay visible however tall the form gets.
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 8, 0)
+        body_layout.addLayout(top)
+        body_layout.addWidget(self.action_error)
+        body_layout.addWidget(self.form_host)
+        body_layout.addWidget(self.advanced)
+        body_layout.addStretch(1)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setWidget(body)
         layout = QVBoxLayout(self)
-        layout.addLayout(top)
-        layout.addWidget(self.action_error)
-        layout.addWidget(self.form_host)
-        layout.addWidget(self.advanced)
-        layout.addStretch(1)
+        layout.addWidget(self.scroll, 1)
         layout.addWidget(buttons)
 
         if step:
@@ -330,6 +340,7 @@ class StepDialog(QDialog):
         self.action_error.hide()
         spec = ACTIONS[self.action()]
         self.action_help.setText(spec.description)
+        self._add_field(self.form, TITLE_FIELD, step)
         for field_spec in spec.fields:
             self._add_field(self.form, field_spec, step)
             if field_spec.name == "locator_value":
@@ -340,7 +351,16 @@ class StepDialog(QDialog):
         if spec.uses_device:
             for field_spec in COMMON_FIELDS:
                 self._add_field(self.advanced_form, field_spec, step)
-        self.adjustSize()
+        self._fit_to_screen()
+
+    def _fit_to_screen(self) -> None:
+        """As tall as the fields need, but never taller than the screen (the fields scroll)."""
+        body = self.scroll.widget()
+        body.adjustSize()
+        wanted = body.sizeHint().height() + 90  # + buttons and margins
+        screen = self.screen() or QApplication.primaryScreen()
+        limit = int(screen.availableGeometry().height() * 0.9) if screen else 800
+        self.resize(max(self.width(), 640), min(wanted, limit))
 
     def _add_alternatives(self, step: dict | None) -> None:
         self.alternatives = LocatorListEditor((step or {}).get("alternatives") or [])
@@ -535,9 +555,10 @@ class StepCard(QFrame):
         number.setObjectName("Muted")
         number.setMinimumWidth(28)
         number.setAlignment(Qt.AlignCenter)
-        title = QLabel(ACTION_LABELS.get(step.get("action"), step.get("action", "?")))
+        title = QLabel(str(step.get("title") or "").strip()
+                       or ACTION_LABELS.get(step.get("action"), step.get("action", "?")))
         title.setObjectName("DeviceName")
-        summary = QLabel(describe_step(step))
+        summary = QLabel(describe_step(step, with_title=False))
         summary.setObjectName("Muted")
         summary.setWordWrap(True)
         header_text = QVBoxLayout()
@@ -609,6 +630,11 @@ class BuilderTab(QWidget):
         self.mode_label = QLabel()
         self.mode_label.setObjectName("Muted")
         self.mode_label.setWordWrap(True)
+        self.roles_button = QPushButton("Turn phone roles into step names")
+        self.roles_button.setToolTip("For scripts that used the Phone box to name steps: moves each "
+                                     "step's phone role into its Step name, so the script runs on one phone")
+        self.roles_button.clicked.connect(self.roles_to_step_names)
+        self.roles_button.hide()
 
         self.cards_host = QWidget()
         self.cards_layout = QVBoxLayout(self.cards_host)
@@ -646,6 +672,7 @@ class BuilderTab(QWidget):
         steps_title.setObjectName("PanelTitle")
         steps_header.addWidget(steps_title)
         steps_header.addWidget(self.mode_label, 1)
+        steps_header.addWidget(self.roles_button)
         steps_header.addWidget(pick)
         steps_header.addWidget(add)
         footer = QHBoxLayout()
@@ -712,6 +739,21 @@ class BuilderTab(QWidget):
             self.mode_label.setText(f"Cross-phone workflow · phones {', '.join(roles)}")
         else:
             self.mode_label.setText("Single-phone script · runs on each phone you start it on")
+        self.roles_button.setVisible(bool(roles))
+
+    def roles_to_step_names(self) -> None:
+        roles = self.roles()
+        answer = QMessageBox.question(
+            self, "Use phone roles as step names?",
+            f"Steps are assigned to {len(roles)} phone role(s): {', '.join(roles)}.\n\n"
+            "If you used the Phone box to name steps, this moves each name into Step name and the "
+            "script becomes a normal one-phone script. Only keep roles if one script really drives "
+            "several phones at once.")
+        if answer != QMessageBox.Yes:
+            return
+        changed = roles_to_titles(self.steps)
+        self.render()
+        self.saved_label.setText(f"Renamed {changed} step(s) — click Save Script to keep it")
 
     def render_list(self, layout: QVBoxLayout, steps: list[dict], path: tuple[int, ...], depth: int,
                     add_button: bool = True) -> None:
