@@ -418,3 +418,18 @@ def test_backup_locators_are_tried_in_order():
                             "alternatives": [{"locator_type": "text", "locator_value": " b "}, {"locator_type": "id"}]})
     assert saved["alternatives"] == [{"locator_type": "text", "locator_value": "b"}]
     assert "+1 backup locator" in describe_step(saved)
+
+
+def test_picker_offers_every_locator_type():
+    elements = parse_page_source(PAGE_SOURCE)
+    order = element_at(elements, 100, 70)
+    found = suggest_locators(order, elements)
+    assert {s.locator_type for s in found} == {"id", "text", "android uiautomator", "xpath"}
+    assert all(s.unique for s in found) and [s.fragile for s in found][-2:] == [True, True]
+    assert ("android uiautomator", 'new UiSelector().resourceId("com.shop:id/order")') in \
+        [(s.locator_type, s.locator_value) for s in found]
+    # Look-alike rows: positional locators are the unique ones, the plain id is not.
+    item = element_at(elements, 100, 290)
+    unique = [(s.locator_type, s.locator_value) for s in suggest_locators(item, elements) if s.unique]
+    assert ("android uiautomator", 'new UiSelector().resourceId("com.shop:id/item").instance(1)') in unique
+    assert ("id", "com.shop:id/item") not in unique

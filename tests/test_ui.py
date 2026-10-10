@@ -215,7 +215,10 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     picker._click(380, 20)
     picker._use_locator()
     menu_xpath = "/android.widget.FrameLayout/android.widget.ImageButton"
-    assert picked == [([("accessibility id", "Menu"), ("xpath", menu_xpath)], (92.5, 2.5))]
+    locators, position = picked[0]
+    assert locators[0] == ("accessibility id", "Menu") and locators[-1] == ("xpath", menu_xpath)
+    assert {t for t, _ in locators} == {"accessibility id", "android uiautomator", "xpath", "class name"}
+    assert position == (92.5, 2.5)
 
     from ui.script_editor import StepDialog
 
@@ -224,20 +227,20 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     dialog._pick()
     assert dialog.inputs["locator_type"].currentText() == "accessibility id"
     assert dialog.inputs["locator_value"].text() == "Menu"
-    assert dialog.alternatives.locators() == [{"locator_type": "xpath", "locator_value": menu_xpath}]
+    backups = [{"locator_type": t, "locator_value": v} for t, v in locators[1:]]
+    assert dialog.alternatives.locators() == backups
     assert dialog.inputs["fallback_x"].value() == 92.5
     dialog.alternatives.value_edit.setText("Menu button")
     dialog.alternatives.type_combo.setCurrentText("text")
     dialog.alternatives._add()
-    dialog.alternatives.list.setCurrentRow(1)
-    dialog.alternatives._move(-1)
-    dialog.alternatives.list.setCurrentRow(0)
+    dialog.alternatives.list.setCurrentRow(dialog.alternatives.list.count() - 1)
+    while dialog.alternatives.list.currentRow() > 0:
+        dialog.alternatives._move(-1)
     dialog._promote_alternative()  # "text=Menu button" becomes main, Menu goes to the backups
     dialog._accept()
     assert dialog.result_step["locator_type"] == "text"
-    assert dialog.result_step["alternatives"] == [
-        {"locator_type": "accessibility id", "locator_value": "Menu"},
-        {"locator_type": "xpath", "locator_value": menu_xpath}]
+    assert dialog.result_step["alternatives"] == [{"locator_type": "accessibility id", "locator_value": "Menu"}] \
+        + backups
     dialog.alternatives._add()
     dialog.alternatives.value_edit.setText("//bad")
     dialog.alternatives.type_combo.setCurrentText("id")

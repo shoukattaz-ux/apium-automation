@@ -142,38 +142,88 @@ def _xpath_literal(value: str) -> str:
     return "concat(" + ", '\"', ".join(f'"{p}"' for p in parts) + ")"
 
 
+def _java_string(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def suggest_locators(element: UiElement, elements: list[UiElement]) -> list[LocatorSuggestion]:
-    """Locators for ``element``, most robust first. Unique ones are preferred by callers."""
+    """Every useful way to find ``element``, across all locator types, most robust first.
+
+    Unique locators come first; positional ones (which break when the layout
+    shifts) are marked fragile and come last. The picker saves all unique ones on
+    a step, so when one stops matching the next is tried.
+    """
     def count(predicate) -> int:
         return sum(1 for e in elements if predicate(e))
 
+    rid, desc, text, cls = element.resource_id, element.content_desc, element.text, element.class_name
+    same = {
+        "rid": lambda e: e.resource_id == rid,
+        "desc": lambda e: e.content_desc == desc,
+        "text": lambda e: e.text == text,
+        "cls": lambda e: e.class_name == cls,
+    }
+
+    def both(*keys):
+        return lambda e: all(same[k](e) for k in keys)
+
     suggestions: list[LocatorSuggestion] = []
-    if element.resource_id:
-        suggestions.append(LocatorSuggestion("id", element.resource_id,
-                                             count(lambda e: e.resource_id == element.resource_id)))
-    if element.content_desc:
-        suggestions.append(LocatorSuggestion("accessibility id", element.content_desc,
-                                             count(lambda e: e.content_desc == element.content_desc)))
-    if element.text:
-        suggestions.append(LocatorSuggestion("text", element.text, count(lambda e: e.text == element.text)))
-    if element.resource_id and element.text:
-        xpath = (f"//*[@resource-id={_xpath_literal(element.resource_id)}"
-                 f" and @text={_xpath_literal(element.text)}]")
-        suggestions.append(LocatorSuggestion("xpath", xpath, count(
-            lambda e: e.resource_id == element.resource_id and e.text == element.text)))
-    if element.resource_id:
-        same_id = [e for e in elements if e.resource_id == element.resource_id]
-        if len(same_id) > 1:
-            position = same_id.index(element) + 1
-            xpath = f"(//*[@resource-id={_xpath_literal(element.resource_id)}])[{position}]"
-            suggestions.append(LocatorSuggestion("xpath", xpath, 1))
+
+    def add(locator_type: str, value: str, matches: int, fragile: bool = False) -> None:
+        if all((s.locator_type, s.locator_value) != (locator_type, value) for s in suggestions):
+            suggestions.append(LocatorSuggestion(locator_type, value, matches, fragile))
+
+    # Single attributes, in each locator type that supports them.
+    if rid:
+        add("id", rid, count(same["rid"]))
+    if desc:
+        add("accessibility id", desc, count(same["desc"]))
+    if text:
+        add("text", text, count(same["text"]))
+    if rid:
+        add("android uiautomator", f"new UiSelector().resourceId({_java_string(rid)})", count(same["rid"]))
+    if desc:
+        add("android uiautomator", f"new UiSelector().description({_java_string(desc)})", count(same["desc"]))
+    if text:
+        add("android uiautomator", f"new UiSelector().text({_java_string(text)})", count(same["text"]))
+
+    # Attribute combinations, for when one attribute alone isn't unique.
+    labels = [(key, attr, value) for key, attr, value in
+              (("rid", "resource-id", rid), ("desc", "content-desc", desc), ("text", "text", text)) if value]
+    for i, (key_a, attr_a, value_a) in enumerate(labels):
+        for key_b, attr_b, value_b in labels[i + 1:]:
+            add("xpath", f"//*[@{attr_a}={_xpath_literal(value_a)} and @{attr_b}={_xpath_literal(value_b)}]",
+                count(both(key_a, key_b)))
+    for key, attr, value in labels:
+        add("xpath", f"//{cls}[@{attr}={_xpath_literal(value)}]", count(both(key, "cls")))
+        method = {"rid": "resourceId", "desc": "description", "text": "text"}[key]
+        add("android uiautomator", f"new UiSelector().className({_java_string(cls)}).{method}({_java_string(value)})",
+            count(both(key, "cls")))
+    if count(same["cls"]) == 1:
+        add("class name", cls, 1)
+
     anchored = _anchored_xpath(element, elements)
     if anchored:
-        suggestions.append(anchored)
-    suggestions.append(LocatorSuggestion("xpath", element.xpath, 1, fragile=True))
+        add(anchored.locator_type, anchored.locator_value, anchored.matches)
+
+    # Position among look-alikes: unique by construction, but shifts if items are added above.
+    if rid:
+        same_id = [e for e in elements if same["rid"](e)]
+        if len(same_id) > 1:
+            position = same_id.index(element)
+            add("xpath", f"(//*[@resource-id={_xpath_literal(rid)}])[{position + 1}]", 1)
+            add("android uiautomator", f"new UiSelector().resourceId({_java_string(rid)}).instance({position})", 1)
+    same_class = [e for e in elements if same["cls"](e)]
+    add("android uiautomator",
+        f"new UiSelector().className({_java_string(cls)}).instance({same_class.index(element)})", 1, fragile=True)
+    add("xpath", element.xpath, 1, fragile=True)
 
     # Unique and stable first, keeping the robustness order within each group.
     return sorted(suggestions, key=lambda s: (not s.unique, s.fragile))
+
+
+def best_locator(element: UiElement, elements: list[UiElement]) -> LocatorSuggestion:
+    return suggest_locators(element, elements)[0]
 
 
 def _anchored_xpath(element: UiElement, elements: list[UiElement]) -> LocatorSuggestion | None:
@@ -201,7 +251,3 @@ def _anchored_xpath(element: UiElement, elements: list[UiElement]) -> LocatorSug
             ups = "/.." * (node.depth - element.depth)
             return LocatorSuggestion("xpath", f"//*[@{attr}={_xpath_literal(value)}]{ups}", 1)
     return None
-
-
-def best_locator(element: UiElement, elements: list[UiElement]) -> LocatorSuggestion:
-    return suggest_locators(element, elements)[0]
