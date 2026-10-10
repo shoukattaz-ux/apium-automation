@@ -27,6 +27,17 @@ Got a folder instead? Keep the whole folder together and run DeviceAutomation.ex
      one? Click "Add New Device".
    - Pick a script for each phone and press Start. Each phone runs on its own.
 
+Wi-Fi instead of a cable (toolbar "Wi-Fi", or Devices > Wireless Devices, Ctrl+Shift+W)
+   - The phone and this PC must be on the same Wi-Fi network.
+   - Any Android: plug the phone in once, pick it under "Switch a USB phone to
+     Wi-Fi", click "Switch to Wi-Fi", then unplug. Repeat after the phone restarts.
+   - Android 11+, no cable: on the phone open Developer options > Wireless
+     debugging > "Pair device with pairing code". Type the IP address & port
+     and the code into "Pair", then "Connect" to the address shown on the
+     Wireless debugging screen.
+   - Connected phones are saved and reconnected automatically. Wi-Fi phones
+     show "Wi-Fi" under their name in the Devices list.
+
 Scripts
    - "New Script" opens the builder: add steps (open app, click, copy, paste,
      scroll, wait) with forms, then "Save Script".
@@ -54,4 +65,8 @@ Troubleshooting
      prompt on the phone, try another cable/port (charge-only cables won't work).
    - A step is skipped: the button/text wasn't on screen in time. Edit the
      step and raise its timeout, or add a "Wait For Element" step before it.
+   - Wi-Fi phone won't connect: check both are on the same network (not a
+     guest network), keep the phone screen on, and switch it to Wi-Fi again
+     with the cable if it was restarted. Some routers block phone-to-PC traffic
+     ("AP/client isolation").
    - Logs are in the "logs" folder next to the .exe.

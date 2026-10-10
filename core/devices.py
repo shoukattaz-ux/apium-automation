@@ -100,12 +100,39 @@ def parse_adb_devices(output: str) -> tuple[list[str], dict[str, str]]:
 
 
 def list_connected_devices() -> list[str]:
-    """Return serial numbers of Android devices that are connected and authorized."""
+    """Return serial numbers of Android devices that are connected and authorized.
+
+    A phone reachable over both USB and Wi-Fi is listed once, by its Wi-Fi serial,
+    so it can't be started twice and keeps its row when the cable is pulled.
+    """
     ready, problems = parse_adb_devices(run_adb("devices"))
     for serial, state in problems.items():
         hint = " (accept the USB debugging prompt on the phone)" if state == "unauthorized" else ""
         log.warning("Device %s is %s%s", serial, state, hint)
-    return ready
+    return drop_usb_duplicates(ready)
+
+
+_hardware_serials: dict[str, str] = {}
+
+
+def hardware_serial(serial: str) -> str:
+    """The phone's own serial number (same over USB and Wi-Fi); cached per adb serial."""
+    if serial not in _hardware_serials:
+        try:
+            _hardware_serials[serial] = run_adb("shell", "getprop", "ro.serialno", serial=serial).strip() or serial
+        except DeviceError:
+            return serial
+    return _hardware_serials[serial]
+
+
+def drop_usb_duplicates(serials: list[str]) -> list[str]:
+    from .wireless import is_wireless
+
+    wireless = [s for s in serials if is_wireless(s)]
+    if not wireless:
+        return serials
+    on_wifi = {hardware_serial(s) for s in wireless}
+    return [s for s in serials if is_wireless(s) or s not in on_wifi]
 
 
 def device_model(serial: str) -> str:

@@ -17,6 +17,10 @@ others.
   **Repeat** and **If element exists / Otherwise** blocks with nested steps,
   per-step **retries** and **stop-on-failure**, and `{{variable}}` placeholders
   in any text.
+- **Wi-Fi phones** (Ctrl+Shift+W) — switch a USB phone to Wi-Fi with one click
+  (`adb tcpip`), pair Android 11+ phones with a pairing code, or connect by IP.
+  Connected phones are remembered and reconnected automatically; a phone on
+  both USB and Wi-Fi is listed once.
 - **Cross-phone workflows** — give steps a phone role (`A`, `B`, …): one script
   copies on phone A and pastes on phone B, sharing variables. At run time you
   choose which real phone plays each role.
@@ -57,6 +61,7 @@ others.
 | `core/history.py` | Run recorder, JSON/HTML reports, failure screenshots, CSV export. |
 | `core/inspector.py` | Parses the screen hierarchy, finds the element under a point, ranks locators. |
 | `core/scheduler.py` | Daily / interval schedules stored in `configs/schedules.json`. |
+| `core/wireless.py`, `ui/wireless_dialog.py` | Wi-Fi connections: switch to Wi-Fi, pair, connect, saved phones and auto-reconnect. |
 | `core/appium_server.py` | Detects Appium and starts a bundled or installed copy if needed. |
 | `core/logging_setup.py`, `core/settings.py`, `core/version.py` | Rotating log + exception hooks, user settings, app version. |
 | `ui/dashboard.py` | Main window. |
