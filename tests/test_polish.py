@@ -10,6 +10,7 @@ import pytest
 from core import logging_setup, paths
 from core import settings as app_settings
 from core.runner import ScriptRunner
+from core.version import APP_VERSION
 from tests.fakes import FakeSession
 
 
@@ -196,7 +197,7 @@ def test_settings_dialog_saves_and_applies(window, tmp_path):
     from ui.settings_dialog import SettingsDialog
 
     dialog = SettingsDialog(window, window.manager)
-    assert "1.1.0" in "".join(label.text() for label in dialog.findChildren(type(dialog.current_log)))
+    assert APP_VERSION in "".join(label.text() for label in dialog.findChildren(type(dialog.current_log)))
     dialog.timeout.setValue(25)
     dialog.appium_url.setText("http://127.0.0.1:4800")
     dialog.log_dir.setText(str(tmp_path / "mylogs"))

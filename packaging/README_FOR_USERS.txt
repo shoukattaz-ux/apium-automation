@@ -60,6 +60,13 @@ Settings (File > Settings, or Ctrl+,)
    - Log folder and "Open Logs Folder": if something goes wrong, the app shows
      "Something went wrong — details saved to logs/..."; send that file.
 
+Updates
+   - The app checks for a new version when it starts (and Help > Check for
+     Updates). Click "Install now": it downloads, checks and installs the update
+     and reopens by itself. Your scripts and settings are kept.
+   - Newest installer: github.com/shoukattaz-ux/apium-automation/releases/latest
+   - Turn the automatic check off in File > Settings.
+
 Troubleshooting
    - Phone not listed: re-plug the cable, check the "Allow USB debugging"
      prompt on the phone, try another cable/port (charge-only cables won't work).

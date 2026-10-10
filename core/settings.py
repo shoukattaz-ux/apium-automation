@@ -27,6 +27,8 @@ class Settings:
     default_timeout_seconds: float = 15.0   # used when a step doesn't set its own timeout
     log_dir: str = ""                       # empty = <data>/logs
     appium_url: str = ""                    # empty = APPIUM_URL env var or http://127.0.0.1:4723
+    check_updates: bool = True              # look for a newer release at startup
+    skipped_version: str = ""               # a release the user chose to skip
 
     def effective_log_dir(self) -> Path:
         return Path(self.log_dir) if self.log_dir else paths.default_logs_dir()

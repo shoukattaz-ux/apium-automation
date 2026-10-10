@@ -276,6 +276,7 @@ def ensure_appium(app, appium_url: str, splash=None):
 
 
 def run_gui(appium_url: str) -> int:
+    from PySide6.QtCore import QTimer
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
@@ -312,6 +313,8 @@ def run_gui(appium_url: str) -> int:
     splash.step(f"Found {found} phone(s)" if found else "Ready", 100)
     window.show()
     splash.finish(window)
+    if app_settings.current().check_updates:
+        QTimer.singleShot(4000, window, lambda: window.check_for_updates(manual=False))
     log.info("%s %s ready (%d phone(s) connected)", APP_NAME, APP_VERSION, found)
     try:
         return app.exec()
