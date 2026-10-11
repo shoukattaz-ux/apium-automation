@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -194,13 +195,21 @@ def connection_lost(exc: BaseException) -> bool:
                      "NewConnectionError", "ConnectionError", "ConnectionRefusedError"}
             or "session is either terminated or not started" in text
             or "Connection refused" in text or "actively refused" in text
-            or "Max retries exceeded" in text or "invalid session id" in text.lower())
+            or "Max retries exceeded" in text or "invalid session id" in text.lower()
+            or _DEVICE_GONE.search(text) is not None)
+
+
+# The phone or Appium's helper on it went away (cable, Wi-Fi, adb or UiAutomator2 crash).
+_DEVICE_GONE = re.compile(r"instrumentation process is not running|device (?:'[^']*' )?not found|"
+                          r"device offline|device '[^']*' is offline|socket hang up|ECONNRESET|"
+                          r"UiAutomator2 server.*(?:not running|crashed)|no devices/emulators found",
+                          re.IGNORECASE)
 
 
 def friendly_error(exc: BaseException) -> str:
     """A one-line message for the UI (connection problems explained instead of a raw traceback line)."""
     if connection_lost(exc):
-        return "Lost the connection to the Appium server. The app reconnects automatically; try again in a moment."
+        return "Lost the connection to the phone or the Appium server. The app reconnects automatically; try again in a moment."
     text = str(exc).strip() or type(exc).__name__
     return text.splitlines()[0].removeprefix("Message: ")
 
@@ -282,6 +291,32 @@ class DeviceSession:
     def is_connected(self) -> bool:
         return self.driver is not None
 
+    def recover(self, timeout: float = 120.0, on_progress: Callable[[str], None] | None = None) -> bool:
+        """Get a dropped phone back: wait for adb to see it again (helping it reconnect),
+        then open a new Appium session. True when the phone can be used again."""
+        from .reliability import wait_for_device
+
+        driver, self.driver = self.driver, None
+        if driver is not None:  # a dead server can make quit() hang: don't wait long for it
+            closer = threading.Thread(target=lambda: _quietly_quit(driver), daemon=True)
+            closer.start()
+            closer.join(10)
+        self._screen = None
+        deadline = time.monotonic() + timeout
+        if not wait_for_device(self.serial, timeout, self.should_stop, on_progress):
+            return False
+        while time.monotonic() < deadline and not self.should_stop():
+            try:
+                self.connect()
+                return True
+            except DeviceError as exc:
+                if on_progress:
+                    on_progress(f"phone is back; starting Appium on it again… ({exc})")
+            end = time.monotonic() + 3
+            while time.monotonic() < end and not self.should_stop():
+                time.sleep(0.2)
+        return False
+
     def close(self) -> None:
         with self._lock:
             if self.driver is not None:
@@ -350,10 +385,7 @@ class DeviceSession:
 
     def paste_text(self, locator_type: str, locator_value: str, text: str, timeout_seconds: float = 15) -> None:
         """Replace the contents of an input field with ``text``."""
-        element = self.find(locator_type, locator_value, timeout_seconds)
-        element.click()
-        element.clear()
-        element.send_keys(text)
+        self._type(self.find(locator_type, locator_value, timeout_seconds), text)
 
     def scroll(self, direction: str = "down", times: int = 1) -> None:
         """Scroll the screen content. ``down`` reveals content further down the page."""
@@ -477,8 +509,10 @@ class DeviceSession:
 
         self._screen = None
         self._screenshot = None
+        self.last_source = None
         try:
-            self._screen = LocalScreen(self.page_source())
+            self.last_source = self.page_source()
+            self._screen = LocalScreen(self.last_source)
         except Exception as exc:  # unreadable layout: fall back to asking the phone per locator
             if connection_lost(exc):
                 raise
@@ -558,11 +592,88 @@ class DeviceSession:
             pass
         return text
 
-    def type_into(self, candidate, text: str) -> None:
-        element = self._element_for(candidate)
+    def type_into(self, candidate, text: str) -> str:
+        """Put ``text`` in a field; returns how: "silent", "paste" or "keyboard"."""
+        return self._type(self._element_for(candidate), text)
+
+    # Silent typing: set the field's text directly (no keyboard, any language or emoji),
+    # check it took, else paste it from the clipboard, else type it the old way.
+    PASTE_KEYCODE = 279
+
+    def _type(self, element, text: str) -> str:
+        from . import settings as app_settings
+
+        if not app_settings.current().silent_typing:
+            element.click()
+            element.clear()
+            element.send_keys(text)
+            return "keyboard"
+        driver = self._require_driver()
+
+        def set_directly() -> None:
+            driver.execute_script("mobile: replaceElementValue", {"elementId": element.id, "text": text})
+
+        def set_value() -> None:
+            element.clear()
+            if text:
+                element.send_keys(text)
+
+        def paste() -> None:
+            driver.set_clipboard_text(text)
+            element.click()
+            element.clear()
+            driver.press_keycode(self.PASTE_KEYCODE)
+
+        for how, attempt in (("silent", set_directly), ("silent", set_value), ("paste", paste)):
+            try:
+                attempt()
+            except (DeviceError, RunStopped):
+                raise
+            except Exception as exc:
+                if connection_lost(exc):
+                    raise
+                log.debug("Typing (%s) on %s didn't work: %s", how, self.serial, _short_error(exc))
+                continue
+            if self._field_has(element, text):
+                self._hide_keyboard()
+                return how
         element.click()
         element.clear()
         element.send_keys(text)
+        self._hide_keyboard()
+        return "keyboard"
+
+    @staticmethod
+    def _field_has(element, text: str) -> bool:
+        """Does the field show ``text``? (Password fields can't be read back: trusted.)"""
+        try:
+            if (element.get_attribute("password") or "").lower() == "true":
+                return True
+            shown = element.get_attribute("text") or ""
+        except Exception as exc:
+            if connection_lost(exc):
+                raise
+            return True  # can't read it back: don't type it again on a guess
+        if not text:
+            return True  # an empty field may show its hint text
+        squash = re.compile(r"[\s\-()]")
+        return squash.sub("", shown) == squash.sub("", text)
+
+    def _hide_keyboard(self) -> None:
+        try:
+            if self.driver is not None and self.driver.is_keyboard_shown():
+                self.driver.hide_keyboard()
+        except Exception:  # not every phone/keyboard supports it; the text is in already
+            pass
+
+    def quick_screenshot(self) -> bytes | None:
+        """A screenshot only if adb can take one quickly (for click checks), else None."""
+        if getattr(self, "_screencap_broken", False):
+            return None
+        try:
+            return adb_screencap(self.serial, timeout=8)
+        except DeviceError:
+            return None
 
 
 # Android key codes for press_key / the "Press Key" step.
@@ -609,6 +720,13 @@ def connect_all_devices(appium_url: str = DEFAULT_APPIUM_URL) -> dict[str, Devic
         except DeviceError as exc:
             log.error("%s", exc)
     return sessions
+
+
+def _quietly_quit(driver) -> None:
+    try:
+        driver.quit()
+    except Exception:  # the session is gone anyway
+        pass
 
 
 def _short_error(exc: Exception) -> str:

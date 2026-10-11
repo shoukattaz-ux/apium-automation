@@ -27,8 +27,13 @@ KIND_COLORS = {
     errorlog.SCRIPT_FAILED: "#ef4444",
     errorlog.STEP_FAILED: "#ef4444",
     errorlog.STEP_SKIPPED: "#eab308",
+    errorlog.NO_REACTION: "#eab308",
+    errorlog.POPUP: "#38bdf8",
+    errorlog.RECONNECTED: "#38bdf8",
+    errorlog.APP_RETURNED: "#38bdf8",
 }
-KINDS = (errorlog.SCRIPT_FAILED, errorlog.STUCK, errorlog.STEP_FAILED, errorlog.STEP_SKIPPED, errorlog.CONNECTION)
+KINDS = (errorlog.SCRIPT_FAILED, errorlog.STUCK, errorlog.STEP_FAILED, errorlog.STEP_SKIPPED, errorlog.CONNECTION,
+         errorlog.NO_REACTION, errorlog.POPUP, errorlog.RECONNECTED, errorlog.APP_RETURNED)
 
 
 class ErrorsPanel(QWidget):

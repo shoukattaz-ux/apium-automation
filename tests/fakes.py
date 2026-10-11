@@ -125,6 +125,9 @@ class FakeSession(DeviceSession):
     def current_package(self):
         return self.package
 
+    def recover(self, timeout=0, on_progress=None):
+        return False  # tests that need a reconnect override this
+
     # verified targeting: elements come from ``screen`` / ``attrs`` / ``matches``
     def candidates(self, locator_type, locator_value):
         from core.targeting import Candidate

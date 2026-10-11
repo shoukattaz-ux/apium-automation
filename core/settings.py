@@ -32,6 +32,13 @@ class Settings:
     alert_enabled: bool = True              # ring when a script still fails after its retries
     alert_sound: str = ""                   # a .wav file; empty = the built-in ringtone
     alert_repeats: int = 3                  # how many times the sound plays
+    verify_clicks: bool = True              # check the app reacted to each click (tap again once if not)
+    dismiss_popups: bool = True             # close system pop-ups that block a step
+    popup_permissions: str = "leave"        # permission prompts: "leave", "allow" or "deny"
+    popup_buttons: str = ""                 # more button texts to press when they block a step (comma list)
+    auto_recover: bool = True               # reconnect a phone that dropped and repeat the step
+    app_guard: bool = True                  # bring the script's app back to the front if the run left it
+    silent_typing: bool = True              # type without the keyboard (any language / emoji)
 
     def effective_log_dir(self) -> Path:
         return Path(self.log_dir) if self.log_dir else paths.default_logs_dir()
@@ -55,6 +62,9 @@ def apply(settings: Settings) -> None:
         settings.alert_repeats = min(50, max(1, int(settings.alert_repeats)))
     except (TypeError, ValueError):
         settings.alert_repeats = 3
+    if settings.popup_permissions not in ("leave", "allow", "deny"):
+        settings.popup_permissions = "leave"
+    settings.popup_buttons = str(settings.popup_buttons or "")
     _current = settings
     paths.set_logs_dir(Path(settings.log_dir) if settings.log_dir else None)
 
