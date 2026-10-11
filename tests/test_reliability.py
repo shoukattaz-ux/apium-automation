@@ -348,3 +348,67 @@ def test_popup_that_will_not_close_does_not_hold_the_step_forever(fast):
     result, errors = _run(session)
     assert result.state == RunState.FAILED and time.monotonic() - started < 30
     assert len([e for e in errors if e.kind == errorlog.POPUP]) == runner_module.MAX_POPUPS_PER_STEP
+
+
+# --------------------------------------------------------------------- app guard
+
+
+class WanderingSession(FakeSession):
+    """A phone that has wandered into another app; Open App brings the app back."""
+
+    def __init__(self, now_in="com.launcher"):
+        super().__init__("S1", {})
+        self.package = now_in
+
+    def open_app(self, package):
+        super().open_app(package)
+        self.package = package
+        self.screen["id=go"] = ""  # the app's button is visible again
+
+
+@pytest.fixture
+def guard_fast(fast, monkeypatch):
+    monkeypatch.setattr(runner_module, "GUARD_AFTER_SECONDS", 0.0)
+    monkeypatch.setattr(runner_module, "GUARD_CHECK_SECONDS", 0.0)
+
+
+def _guarded_click(**extra):
+    return {"name": "t", "steps": [dict(CLICK["steps"][0], **extra)]}
+
+
+def test_app_guard_brings_the_picked_app_back(guard_fast):
+    session = WanderingSession()
+    result, errors = _run(session, _guarded_click(screen={"package": "com.shop", "anchors": []}))
+    assert result.state == RunState.COMPLETED
+    assert ("open_app", "com.shop") in session.calls and ("click", "id=go") in session.calls
+    assert errors[0].kind == errorlog.APP_RETURNED and "com.launcher" in errors[0].reason
+
+
+def test_app_guard_uses_the_last_open_app_and_confirms_twice(guard_fast):
+    session = WanderingSession(now_in="com.shop")
+    script = {"name": "t", "steps": [{"action": "open_app", "package": "com.shop"},
+                                     {"action": "press_key", "key": "home"},
+                                     dict(CLICK["steps"][0])]}
+
+    def go_home(key):
+        session.package = "com.launcher"
+        session.screen.pop("id=go", None)  # the app's button isn't on the home screen
+
+    session.press_key = go_home
+    result, errors = _run(session, script)
+    assert result.state == RunState.COMPLETED
+    assert session.calls.count(("open_app", "com.shop")) == 2  # the step's own + the guard's
+    assert [e.kind for e in errors] == [errorlog.APP_RETURNED]
+
+
+def test_app_guard_leaves_dialogs_and_can_be_turned_off(guard_fast, monkeypatch):
+    from core import settings as app_settings
+
+    session = WanderingSession(now_in="android")  # a system dialog over the app: not "another app"
+    result, _ = _run(session, _guarded_click(screen={"package": "com.shop", "anchors": []}, timeout_seconds=0.5))
+    assert result.state == RunState.FAILED and ("open_app", "com.shop") not in session.calls
+
+    monkeypatch.setattr(app_settings, "_current", app_settings.Settings(app_guard=False))
+    session = WanderingSession()
+    result, _ = _run(session, _guarded_click(screen={"package": "com.shop", "anchors": []}, timeout_seconds=0.5))
+    assert result.state == RunState.FAILED and ("open_app", "com.shop") not in session.calls

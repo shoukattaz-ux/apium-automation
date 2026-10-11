@@ -73,6 +73,8 @@ Reliability (File > Settings > Reliability; all on by default)
      open notification panel are closed automatically when they block a step.
      Choose what to do with permission prompts, and add buttons of your own
      (e.g. "Not now, Skip") to press when they get in the way.
+   - App guard: if a run ends up on the home screen or in another app, the
+     script's app is brought back to the front automatically.
    - Reconnect: a phone that drops during a run is reconnected and the step
      is repeated.
    - Silent typing: text is filled in without the keyboard, in any language.

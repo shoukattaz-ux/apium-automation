@@ -114,6 +114,12 @@ class SettingsDialog(QDialog):
         self.auto_recover.setChecked(o.auto_recover)
         self.auto_recover.setToolTip("Waits up to 2 minutes for the phone: reconnects Wi-Fi phones, revives "
                                      "offline ones and restarts adb if it stopped answering")
+        self.app_guard = QCheckBox("App guard: if a run ends up in another app, bring its app back to the front")
+        self.app_guard.setChecked(o.app_guard)
+        self.app_guard.setToolTip("When a step can't find its element because the phone is on the home screen or "
+                                  "in another app, the step's app is brought straight back (no guessing how many "
+                                  "times to press Back). The step's app is the one it was picked in, else the "
+                                  "last Open App step's.")
         self.silent_typing = QCheckBox("Silent typing: fill fields without the keyboard (any language, emoji)")
         self.silent_typing.setChecked(o.silent_typing)
         self.silent_typing.setToolTip("Sets the text directly and checks it took; falls back to pasting, then to "
@@ -125,6 +131,7 @@ class SettingsDialog(QDialog):
         reliability_form.addRow("Pop-ups", self.dismiss_popups)
         reliability_form.addRow("Permission prompts", self.popup_permissions)
         reliability_form.addRow("Also press", self.popup_buttons)
+        reliability_form.addRow("Wrong app", self.app_guard)
         reliability_form.addRow("Connection", self.auto_recover)
         reliability_form.addRow("Typing", self.silent_typing)
 
@@ -247,6 +254,7 @@ class SettingsDialog(QDialog):
                                    popup_permissions=self.popup_permissions.currentData(),
                                    popup_buttons=self.popup_buttons.text().strip(),
                                    auto_recover=self.auto_recover.isChecked(),
+                                   app_guard=self.app_guard.isChecked(),
                                    silent_typing=self.silent_typing.isChecked())
 
     def _save(self) -> None:

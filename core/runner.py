@@ -25,7 +25,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from .devices import DeviceError, DeviceSession, ElementNotFound, RunStopped, connection_lost
 from .errorlog import (
-    CONNECTION, NO_REACTION, POPUP, RECONNECTED, STEP_FAILED, STEP_SKIPPED, ErrorEntry,
+    APP_RETURNED, CONNECTION, NO_REACTION, POPUP, RECONNECTED, STEP_FAILED, STEP_SKIPPED, ErrorEntry,
 )
 from .groups import Group, group_from_dict, is_group_data
 from .history import RunRecorder, StepRecord
@@ -53,6 +53,11 @@ POPUP_CHECK_SECONDS = 1.5 # how often a step that can't find its element looks f
 RECOVER_SECONDS = 120     # how long to wait for a dropped phone to come back
 MAX_RECOVERIES = 3        # reconnects per run (a phone that keeps dropping needs a look)
 MAX_POPUPS_PER_STEP = 5   # a pop-up that keeps coming back must not hold a step forever
+GUARD_AFTER_SECONDS = 3.0 # a step looks this long (the app may still be switching) before the app guard acts
+GUARD_CHECK_SECONDS = 2.0
+MAX_APP_RETURNS_PER_STEP = 3
+# Not "another app": dialogs shown over the app (pop-up closing deals with them).
+OVERLAY_PACKAGES = reliability.SYSTEM_PACKAGES | reliability.PERMISSION_PACKAGES
 
 
 @dataclass
@@ -267,6 +272,10 @@ class ScriptRunner:
         self._last_popup_check = 0.0
         self._popups_closed = 0
         self._step_label = ""
+        self._current_app: dict[str, str] = {}  # serial -> package of the last Open App step
+        self._app_returns = 0
+        self._last_guard_check = 0.0
+        self._wrong_app_seen = ""
 
     @property
     def serial(self) -> str:
@@ -432,6 +441,8 @@ class ScriptRunner:
         error = ""
         self._step_label = f"{label}  {describe_step(step)}"
         self._popups_closed = 0
+        self._app_returns = 0
+        self._wrong_app_seen = ""
         attempt = 0
         while attempt < retries + 1:
             attempt += 1
@@ -527,6 +538,53 @@ class ScriptRunner:
         self._sleep(0.8)
         return True
 
+    def _guard_app(self, step: dict, session: DeviceSession, looking_since: float) -> bool:
+        """The App-Intent Guard: the step can't find its element because the phone is in
+        another app (home screen, a share target, an ad...). Instead of pressing Back an
+        unknown number of times, bring the step's app straight back to the front.
+
+        The step's app is the one its screen was picked on, else the last Open App step's.
+        Without a picked screen the wrong app must be seen on two checks in a row (a click
+        may legitimately have moved to another app that is still loading).
+        """
+        now = time.monotonic()
+        if (not app_settings.current().app_guard or self._app_returns >= MAX_APP_RETURNS_PER_STEP
+                or now - looking_since < GUARD_AFTER_SECONDS or now - self._last_guard_check < GUARD_CHECK_SECONDS):
+            return False
+        picked = (step.get("screen") or {}).get("package") if step.get("check_screen", True) else None
+        expected = picked or self._current_app.get(session.serial)
+        if not expected:
+            return False
+        self._last_guard_check = now
+        try:
+            current = session.current_package() or ""
+        except Exception as exc:
+            if _session_lost(exc):
+                raise
+            return False
+        if not current or current == expected or current in OVERLAY_PACKAGES:
+            self._wrong_app_seen = ""
+            return False
+        if not picked and self._wrong_app_seen != current:
+            self._wrong_app_seen = current  # seen once: confirm on the next check
+            return False
+        self._app_returns += 1
+        self._wrong_app_seen = ""
+        shot = self._failure_screenshot(session, "left_app")
+        self.log(f"    ↩ The phone is in {current}, not {expected} — bringing {expected} back to the front",
+                 session, logging.WARNING)
+        try:
+            session.open_app(expected)
+        except DeviceError as exc:
+            self.log(f"    ✗ Could not bring {expected} back: {exc}", session, logging.WARNING)
+            self._app_returns = MAX_APP_RETURNS_PER_STEP  # don't keep trying this step
+            return False
+        self._report_error(APP_RETURNED, session, f"The run had left the app (was in {current}); brought "
+                                                  f"{expected} back to the front", self._step_label,
+                           screenshot=shot)
+        self._sleep(1.0)
+        return True
+
     def _click_checked(self, step: dict, session: DeviceSession, tap: Callable[[], None]) -> None:
         """Click, then make sure the app reacted; tap once more if it plainly didn't."""
         before = getattr(session, "last_source", None)
@@ -589,6 +647,7 @@ class ScriptRunner:
             raise StopScript(value("message", ""))
         elif action == "open_app":
             session.open_app(value("package"))
+            self._current_app[session.serial] = value("package")
         elif action == "close_app":
             session.close_app(value("package"))
         elif action == "scroll":
@@ -698,6 +757,7 @@ class ScriptRunner:
         target, screen = self._checks(step)
         quorum = self._quorum(step, locators, target)
         deadline = time.monotonic() + max(0.0, timeout)
+        looking_since = time.monotonic()
         size: tuple[int, int] | None = None
         invalid: set[int] = set()
         noted: set[str] = set()
@@ -779,9 +839,10 @@ class ScriptRunner:
                             self._log_choice(winner, locators, invalid, target, session)
                             return winner.candidate
                         settling, reason, winner = bounds, why, None
-            if winner is None and settling is None and self._clear_popup(session):
+            if winner is None and settling is None and (self._clear_popup(session)
+                                                        or self._guard_app(step, session, looking_since)):
                 deadline = max(deadline, time.monotonic() + 2)
-                continue  # a pop-up was in the way: look again straight away
+                continue  # a pop-up was in the way / the app is back in front: look again straight away
             if (winner is None and on_screen and settling is None and scrolls_left
                     and time.monotonic() >= next_scroll):
                 # Not on screen (e.g. further down a long list): scroll and look again.

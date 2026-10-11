@@ -37,6 +37,7 @@ class Settings:
     popup_permissions: str = "leave"        # permission prompts: "leave", "allow" or "deny"
     popup_buttons: str = ""                 # more button texts to press when they block a step (comma list)
     auto_recover: bool = True               # reconnect a phone that dropped and repeat the step
+    app_guard: bool = True                  # bring the script's app back to the front if the run left it
     silent_typing: bool = True              # type without the keyboard (any language / emoji)
 
     def effective_log_dir(self) -> Path:

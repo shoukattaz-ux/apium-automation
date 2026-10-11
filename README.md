@@ -56,6 +56,11 @@ others.
     dialogs are closed: "isn't responding" (Wait), "keeps stopping", system
     notices (OK / Got it / Not now…), an open notification panel; permission
     prompts optionally (allow / deny); plus your own list of button texts.
+  - *App guard* — when a step can't find its element because the phone is on the
+    home screen or in another app, the step's app (the one it was picked in, else
+    the last Open App step's) is brought straight back to the front, instead of
+    guessing how many times to press Back. Dialogs over the app are left to pop-up
+    closing; without a picked screen the wrong app must be seen twice first.
   - *Reconnect* — a phone that drops mid-run (cable, Wi-Fi, adb or Appium's helper
     crashing) is brought back (Wi-Fi reconnect, offline revive, adb restart if adb
     hangs, new Appium session) and the step is repeated, up to 3 times a run.

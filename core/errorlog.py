@@ -33,6 +33,7 @@ CONNECTION = "connection"          # the phone or Appium connection was lost
 POPUP = "pop-up closed"            # a system pop-up blocked a step and was closed
 NO_REACTION = "no reaction"        # the app showed no change after a click (tapped twice)
 RECONNECTED = "reconnected"        # the phone dropped and was reconnected mid-run
+APP_RETURNED = "app brought back"  # the run had left the app; it was brought back to the front
 
 
 @dataclass
