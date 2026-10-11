@@ -194,6 +194,10 @@ class RunDialog(QDialog):
         elif entry.is_workflow:
             self.hint.setText(f"Cross-phone workflow: choose a phone for each role "
                               f"({', '.join(entry.roles)}). Steps run in order across the phones.")
+        elif entry.is_group:
+            self.hint.setText(f"Group: its {entry.size} scripts run one after another on every phone "
+                              "you tick. A failing script is retried, then skipped (or ends the group, "
+                              "as the group is set up).")
         else:
             self.hint.setText("Runs independently on every phone you tick.")
         self.picker.set_script(entry, self._preselect)

@@ -333,3 +333,76 @@ def test_step_names_and_roles_to_names(app, configs, window_factory):
     screen = dialog.screen().availableGeometry().height()
     assert dialog.height() <= screen
     editor.close()
+
+
+def test_groups_library_errors_tab_and_alarm(app, configs, window_factory, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from core.alerts import Alerter
+    from core.groups import load_group
+    from ui.library_dialog import GroupEditorDialog, LibraryDialog
+
+    ok = {"name": "Ok", "steps": [{"action": "click", "locator_type": "id", "locator_value": "go"}]}
+    bad = {"name": "Bad", "steps": [{"action": "click", "locator_type": "id", "locator_value": "missing",
+                                     "timeout_seconds": 0, "on_fail": "stop"}]}
+    (configs / "ok.json").write_text(json.dumps(ok))
+    (configs / "bad.json").write_text(json.dumps(bad))
+    sessions = {"A1": FakeSession("A1", {"id=go": ""})}
+    window = window_factory(sessions)
+    played = []
+    window.manager.alerter = Alerter(player=lambda path, stop: played.append(path) or stop.wait(0.3))
+    window.manager.alerter.listeners.append(lambda ringing, reason: window.bridge.alarm.emit(ringing, reason))
+
+    # Build a group in the editor: bad first, then ok.
+    editor = GroupEditorDialog(window)
+    editor.name.setText("Chain")
+    for index in range(editor.library.count()):
+        if editor.library.item(index).data(Qt.UserRole) == "bad.json":
+            editor.library.item(index).setSelected(True)
+    editor._add()
+    editor.library.clearSelection()
+    for index in range(editor.library.count()):
+        if editor.library.item(index).data(Qt.UserRole) == "ok.json":
+            editor.library.item(index).setSelected(True)
+    editor._add()
+    editor.retries.setValue(1)
+    editor.pause.setValue(0)
+    editor._save()
+    assert editor.result() == QDialog.Accepted
+    group = load_group(editor.saved_path)
+    assert group.scripts == ["bad.json", "ok.json"] and group.retries == 1
+
+    # It shows up in the phone's dropdown and runs from there.
+    window.reload_scripts()
+    combo = window.rows["A1"].script_combo
+    combo.setCurrentIndex(combo.findData(str(editor.saved_path)))
+    assert "group · 2 scripts" in combo.currentText()
+    window.start_device("A1")
+    assert wait_for(app, lambda: not window.manager.is_running("A1"), timeout=15)
+    assert wait_for(app, lambda: window.rows["A1"].state == RunState.PARTIAL)
+    assert ("click", "id=go") in sessions["A1"].calls  # ok ran after bad was skipped
+    assert played  # alarm rang
+    assert wait_for(app, lambda: window.errors.table.rowCount() >= 3)
+    assert window.tabs.tabText(window.errors_tab_index).startswith("Errors (")
+    window.show_errors()
+    assert window.tabs.tabText(window.errors_tab_index) == "Errors"
+    window.errors.table.selectRow(0)
+    assert "Chain" in window.errors.details.text()
+
+    window.stop_alarm()
+    assert window.alarm_button.isHidden()
+
+    # Library: duplicate, then delete the copy.
+    library = LibraryDialog(window, open_editor=window.new_script, on_change=window.reload_scripts)
+    names = [e.name for e in library.entries]
+    library.list.setCurrentRow(names.index("Ok"))
+    library.duplicate()
+    assert "Ok (copy)" in [e.name for e in library.entries]
+    assert library.selected().name == "Ok (copy)"
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    library.delete()
+    assert "Ok (copy)" not in [e.name for e in library.entries]
+    assert any((configs / "deleted").iterdir())
+    library.list.setCurrentRow([e.name for e in library.entries].index("Ok"))
+    assert "Group: Chain" in library.info.text()

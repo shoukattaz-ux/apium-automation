@@ -46,6 +46,29 @@ Scripts
      scroll, wait) with forms, then "Save Script".
    - Saved scripts are plain files in the "configs" folder next to the .exe.
      You can copy scripts between computers by copying that folder.
+   - Script Library (toolbar "Library", or Ctrl+L): all your scripts and
+     groups. Duplicate a script to make a changed copy, Rename it, or Delete
+     it (it goes to the "configs\deleted" folder, so you can bring it back).
+
+Groups (several scripts one after another)
+   - Library > New Group (or Ctrl+G): give it a name, add scripts in the order
+     they should run, and choose what happens when one fails:
+       Retry: how many extra tries a failing script gets.
+       Then: "Skip it and go on with the next script" (or stop the group).
+       Stuck after: a script still running after this many minutes is
+         stopped and counted as failed (0 = no limit).
+       Ring the alarm when a script still fails.
+   - The group appears in every phone's script list: pick it, press Start,
+     and Script 1, 2, 3 ... run by themselves. Schedules and Run... can use
+     groups too.
+
+Alarm and Errors tab
+   - When a script still fails after its retries, a ringtone plays. Press
+     "Stop alarm" at the bottom of the window to silence it. Choose your own
+     .wav sound and how many times it plays in File > Settings > Alerts.
+   - The "Errors" tab lists every problem: which phone, which script and step,
+     why, and a picture of the phone screen at that moment. Click a row to see
+     it; "Open Report" shows the whole run.
 
 More tools
    - Element Picker: shows a live picture of the phone. Click a button to see
@@ -60,6 +83,7 @@ More tools
 
 Settings (File > Settings, or Ctrl+,)
    - Default element timeout: how long steps wait for a button/text to appear.
+   - Alerts: alarm on/off, the sound (.wav), how many times it plays, Test.
    - Log folder and "Open Logs Folder": if something goes wrong, the app shows
      "Something went wrong — details saved to logs/..."; send that file.
 

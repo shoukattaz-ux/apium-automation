@@ -29,6 +29,9 @@ class Settings:
     appium_url: str = ""                    # empty = APPIUM_URL env var or http://127.0.0.1:4723
     check_updates: bool = True              # look for a newer release at startup
     skipped_version: str = ""               # a release the user chose to skip
+    alert_enabled: bool = True              # ring when a script still fails after its retries
+    alert_sound: str = ""                   # a .wav file; empty = the built-in ringtone
+    alert_repeats: int = 3                  # how many times the sound plays
 
     def effective_log_dir(self) -> Path:
         return Path(self.log_dir) if self.log_dir else paths.default_logs_dir()
@@ -48,6 +51,10 @@ def default_timeout() -> float:
 def apply(settings: Settings) -> None:
     global _current
     settings.default_timeout_seconds = min(MAX_TIMEOUT, max(MIN_TIMEOUT, float(settings.default_timeout_seconds)))
+    try:
+        settings.alert_repeats = min(50, max(1, int(settings.alert_repeats)))
+    except (TypeError, ValueError):
+        settings.alert_repeats = 3
     _current = settings
     paths.set_logs_dir(Path(settings.log_dir) if settings.log_dir else None)
 

@@ -13,6 +13,7 @@ Nothing here depends on Qt.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
 from .devices import DeviceError, DeviceSession, ElementNotFound, RunStopped, connection_lost
+from .errorlog import CONNECTION, STEP_FAILED, STEP_SKIPPED, ErrorEntry
+from .groups import Group, group_from_dict, is_group_data
 from .history import RunRecorder, StepRecord
 from .inspector import element_at, parse_page_source
 from . import paths
@@ -120,7 +123,7 @@ class PythonScript:
     path: Path | None = None
 
 
-Script = dict | PythonScript
+Script = dict | PythonScript | Group
 
 
 def load_any_script(path: str | Path) -> Script:
@@ -132,16 +135,23 @@ def load_any_script(path: str | Path) -> Script:
         except OSError as exc:
             raise ScriptError(f"Could not read {path.name}: {exc}") from exc
         return PythonScript(name=path.stem, source=source, path=path)
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None  # load_script reports it properly
+        if is_group_data(data):
+            return group_from_dict(data, path)
     return load_script(path)
 
 
 def script_name(script: Script) -> str:
-    return script.name if isinstance(script, PythonScript) else script.get("name", "script")
+    return script.name if isinstance(script, (PythonScript, Group)) else script.get("name", "script")
 
 
 def roles_of(script: Script) -> list[str]:
     """Phone roles a script needs (empty for single-phone scripts)."""
-    return [] if isinstance(script, PythonScript) else script_roles(script)
+    return [] if isinstance(script, (PythonScript, Group)) else script_roles(script)
 
 
 def needs_role_mapping(script: Script) -> bool:
@@ -214,8 +224,12 @@ class ScriptRunner:
                  stop_event: threading.Event | None = None,
                  variables: dict[str, Any] | None = None,
                  recorder: RunRecorder | None = None,
-                 run_number: int = 1):
+                 run_number: int = 1,
+                 on_error: Callable[[ErrorEntry], None] | None = None,
+                 group: str = ""):
         self.script = script
+        self.on_error = on_error  # the Errors / Stuck log
+        self.group = group
         self.on_log = on_log
         self.status = status or StatusBoard()
         self.stop_event = stop_event or threading.Event()
@@ -279,6 +293,17 @@ class ScriptRunner:
                 status=status, started_at=started, duration=time.time() - started,
                 attempts=attempts, error=error, screenshot=screenshot))
 
+    def _report_error(self, kind: str, session: DeviceSession | None, reason: str, step: str = "",
+                      attempts: int = 1, screenshot: str = "") -> None:
+        """Add an entry to the Errors / Stuck log (with the failure screenshot, if any)."""
+        if not self.on_error:
+            return
+        shot = str(self.recorder.folder / screenshot) if (screenshot and self.recorder) else ""
+        self.on_error(ErrorEntry(kind=kind, device=session.serial if session else ",".join(self.serials),
+                                 script=script_name(self.script), reason=reason, step=step, group=self.group,
+                                 attempts=attempts, screenshot=shot,
+                                 report=str(self.recorder.folder) if self.recorder else ""))
+
     def _failure_screenshot(self, session: DeviceSession | None, name: str) -> str:
         if not (self.recorder and session):
             return ""
@@ -339,6 +364,7 @@ class ScriptRunner:
         except StepFailed as exc:
             return result(RunState.FAILED, error=str(exc))
         except SessionLost as exc:
+            self._report_error(CONNECTION, next(iter(self.sessions.values()), None), f"Lost connection to phone: {exc}")
             return result(RunState.FAILED, error=f"Lost connection to phone: {exc}")
         except ScriptError as exc:
             return result(RunState.FAILED, error=str(exc))
@@ -408,6 +434,8 @@ class ScriptRunner:
                 shot = self._failure_screenshot(session, f"step_{label}_failed")
                 stop = step.get("on_fail") == "stop"
                 self._record(label, step, session, "failed" if stop else "skipped", started, attempt, error, shot)
+                self._report_error(STEP_FAILED if stop else STEP_SKIPPED, session, error,
+                                   f"{label}  {describe_step(step)}", attempt, shot)
                 if stop:
                     self.log(f"{indent}  ✖ Step {label} failed: {error}", session, logging.ERROR)
                     raise StepFailed(f"Step {label} failed: {error}") from exc
