@@ -1,7 +1,8 @@
-"""The main dashboard: phones, per-phone script picker, Start/Stop, live logs and run history.
+"""The main dashboard: phones, per-phone script picker, Start/Stop, live logs, run history
+and the Errors / Stuck log.
 
-Also the hub for the other windows: script editor, Run dialog (repeats and
-cross-phone workflows), element picker and schedules.
+Also the hub for the other windows: script editor, Script Library (duplicate, delete,
+groups), Run dialog (repeats and cross-phone workflows), element picker and schedules.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ from PySide6.QtWidgets import (
 from core import paths
 from core.appium_server import is_server_running
 from core.devices import DeviceError, device_model, list_connected_devices
+from core.errorlog import ErrorEntry, ErrorLog
+from core.groups import load_group
 from core.library import ScriptEntry, list_scripts, resolve_script
 from core.manager import DeviceManager
 from core.runner import PythonScript, RunState, load_any_script, needs_role_mapping, roles_of, script_name
@@ -30,6 +33,7 @@ from core.schema import ScriptError
 from core.version import APP_NAME, APP_VERSION
 from core.wireless import AutoReconnector, WirelessStore, is_wireless
 
+from .errors_panel import ErrorsPanel
 from .history import HistoryPanel
 from .qtutil import safe_emit
 from .run_dialog import RunDialog, RunRequest
@@ -52,6 +56,8 @@ class Bridge(QObject):
     appium_checked = Signal(bool)
     update_checked = Signal(object, str, bool)  # release or None, error, manual
     run_finished = Signal(list)                # serials
+    error_added = Signal(object)               # ErrorEntry
+    alarm = Signal(bool, str)                  # ringing, reason
 
 
 class DeviceRow(QFrame):
@@ -175,6 +181,8 @@ class MainWindow(QMainWindow):
         self.resize(1320, 780)
 
         self.manager = manager or DeviceManager()
+        if self.manager.error_log is None:
+            self.manager.error_log = ErrorLog()
         self.schedules = schedules or ScheduleStore()
         self.bridge = Bridge(self)  # parented: destroyed with the window, so late signals are dropped
         self.bridge.log.connect(self._append_log)
@@ -186,6 +194,12 @@ class MainWindow(QMainWindow):
         self.manager.add_log_listener(lambda serial, msg: safe_emit(self.bridge.log, serial, msg))
         self.manager.status.subscribe(lambda serial, entry: safe_emit(self.bridge.status, serial, entry))
         self.manager.add_finished_listener(lambda serials, results: safe_emit(self.bridge.run_finished, serials))
+        self.bridge.error_added.connect(self._error_added)
+        self.bridge.alarm.connect(self._apply_alarm)
+        self.manager.error_log.listeners.append(lambda entry: safe_emit(self.bridge.error_added, entry))
+        if self.manager.alerter is not None:
+            self.manager.alerter.listeners.append(
+                lambda ringing, reason: safe_emit(self.bridge.alarm, ringing, reason))
 
         self.rows: dict[str, DeviceRow] = {}
         self.logs: dict[str, list[str]] = {}
@@ -248,6 +262,13 @@ class MainWindow(QMainWindow):
                self.new_script, "Ctrl+N")
         action("edit", "&Edit Script…", "✎  Edit Script…", "Open a saved script in the builder", self.edit_script,
                "Ctrl+O")
+        action("library", "Script &Library…", "☰  Library",
+               "All scripts and groups: duplicate, rename, delete, chain scripts into groups",
+               self.open_library, "Ctrl+L")
+        action("new_group", "New &Group…", "New Group", "Chain several scripts to run one after another on a phone",
+               self.new_group, "Ctrl+G")
+        action("errors", "&Errors / Stuck Log", "Errors", "Where and why runs failed or got stuck, with screenshots",
+               self.show_errors, "Ctrl+E")
         action("picker", "Element &Picker…", "◎  Element Picker",
                "Inspect a phone screen, pick elements and record steps", self.open_inspector, "Ctrl+I")
         action("run", "&Run…", "▶  Run…", "Run a script on chosen phones — repeats and cross-phone workflows",
@@ -268,9 +289,10 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         a = self.actions
         menus = (
-            ("&File", ["new", "edit", None, "configs", "logs", None, "settings", None, "quit"]),
+            ("&File", ["new", "edit", "library", "new_group", None, "configs", "logs", None, "settings", None,
+                       "quit"]),
             ("&Devices", ["refresh", "wireless", None, "run", "start_all", "stop_all"]),
-            ("&Tools", ["picker", "schedules"]),
+            ("&Tools", ["picker", "schedules", None, "errors"]),
             ("&Help", ["guide", "updates", "logs", None, "about"]),
         )
         for title, keys in menus:
@@ -287,7 +309,8 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addToolBar(toolbar)
-        for key in ("refresh", "wireless", "configs", None, "new", "edit", "picker", None, "run", "start_all", "stop_all",
+        for key in ("refresh", "wireless", "configs", None, "new", "edit", "library", "picker", None, "run", "start_all",
+                    "stop_all",
                     None, "schedules", "settings"):
             if key is None:
                 toolbar.addSeparator()
@@ -352,15 +375,18 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_view, 1)
 
         self.history = HistoryPanel()
+        self.errors = ErrorsPanel(self.manager.error_log)
+        self.errors.count_changed.connect(self._update_errors_tab)
         self.tabs = QTabWidget()
         self.tabs.addTab(log_tab, "Live Log")
         self.tabs.addTab(self.history, "Run History")
+        self.errors_tab_index = self.tabs.addTab(self.errors, "Errors")
         right = QFrame()
         right.setObjectName("Panel")
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(10, 10, 10, 10)
         right_layout.addWidget(self.tabs)
-        self.tabs.currentChanged.connect(lambda i: self.history.reload() if i == 1 else None)
+        self.tabs.currentChanged.connect(self._tab_changed)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(devices_panel)
@@ -378,6 +404,12 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self) -> None:
         bar = QStatusBar()
         self.setStatusBar(bar)
+        self.alarm_button = QPushButton("🔔  Stop alarm")
+        self.alarm_button.setObjectName("Danger")
+        self.alarm_button.setToolTip("Silence the alarm (the problem is in the Errors tab)")
+        self.alarm_button.clicked.connect(self.stop_alarm)
+        self.alarm_button.hide()
+        bar.addPermanentWidget(self.alarm_button)
         self.schedule_label = QLabel("")
         bar.addPermanentWidget(self.schedule_label)
         self.appium_label = QLabel("Appium: checking…")
@@ -719,9 +751,72 @@ class MainWindow(QMainWindow):
 
     def edit_script(self) -> None:
         target, _ = QFileDialog.getOpenFileName(self, "Open script", str(paths.configs_dir()),
-                                                "Scripts (*.json *.py)")
-        if target:
+                                                "Scripts and groups (*.json *.py)")
+        if not target:
+            return
+        try:
+            script = load_any_script(target)
+        except ScriptError:
+            script = None  # let the editor show what's wrong with it
+        if script is not None and not isinstance(script, (dict, PythonScript)):
+            self.edit_group(Path(target))
+        else:
             self.new_script(Path(target))
+
+    def open_library(self) -> None:
+        from .library_dialog import LibraryDialog
+
+        self.reload_scripts()
+        dialog = LibraryDialog(self, open_editor=self.new_script, run=lambda path: self.open_run_dialog(path),
+                               on_change=self.reload_scripts)
+        dialog.exec()
+        self.reload_scripts()
+
+    def new_group(self) -> None:
+        from .library_dialog import GroupEditorDialog
+
+        if GroupEditorDialog(self).exec() == QDialog.Accepted:
+            self.reload_scripts()
+
+    def edit_group(self, path: Path) -> None:
+        from .library_dialog import GroupEditorDialog
+
+        try:
+            group = load_group(path)
+        except ScriptError as exc:
+            QMessageBox.warning(self, "Group problem", str(exc))
+            return
+        if GroupEditorDialog(self, group).exec() == QDialog.Accepted:
+            self.reload_scripts()
+
+    # ------------------------------------------------------------------ errors and alarm
+
+    def show_errors(self) -> None:
+        self.tabs.setCurrentIndex(self.errors_tab_index)
+
+    def _tab_changed(self, index: int) -> None:
+        if index == 1:
+            self.history.reload()
+        elif index == self.errors_tab_index:
+            self.errors.mark_seen()
+
+    def _error_added(self, entry: ErrorEntry) -> None:
+        self.errors.add_entry(entry)
+        if self.tabs.currentIndex() == self.errors_tab_index:
+            self.errors.mark_seen()
+
+    def _update_errors_tab(self, unseen: int) -> None:
+        self.tabs.setTabText(self.errors_tab_index, f"Errors ({unseen})" if unseen else "Errors")
+
+    def _apply_alarm(self, ringing: bool, reason: str) -> None:
+        self.alarm_button.setVisible(ringing)
+        if ringing:
+            self.statusBar().showMessage(f"🔔 {reason}", 15000)
+
+    def stop_alarm(self) -> None:
+        if self.manager.alerter is not None:
+            self.manager.alerter.stop()
+        self.alarm_button.hide()
 
     def open_inspector(self, add_steps: Callable[[list[dict]], None] | None = None,
                        on_pick: Callable[[str, str], None] | None = None, roles: list[str] | None = None):
@@ -854,5 +949,7 @@ class MainWindow(QMainWindow):
             timer.stop()
         for window in list(self._windows):
             window.close()
+        if self.manager.alerter is not None:
+            self.manager.alerter.stop()
         self.manager.shutdown()
         super().closeEvent(event)

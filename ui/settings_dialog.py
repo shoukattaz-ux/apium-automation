@@ -1,7 +1,8 @@
-"""Settings dialog: default timeout, Appium URL, log folder, and version info."""
+"""Settings dialog: default timeout, Appium URL, alarm sound, log folder, and version info."""
 
 from __future__ import annotations
 
+import dataclasses
 import platform
 import sys
 from importlib import metadata
@@ -11,7 +12,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QVBoxLayout,
+    QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from core import paths, settings as app_settings
@@ -37,6 +38,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setMinimumWidth(560)
+        self.resize(620, 760)  # scrolls on smaller screens
         self.manager = manager
         self.original = app_settings.current()
 
@@ -88,6 +90,42 @@ class SettingsDialog(QDialog):
         open_row.addWidget(open_logs)
         logs_form.addRow("", open_row)
 
+        # ---- alerts
+        self.alert_enabled = QCheckBox("Ring an alarm when a script still fails after its retries")
+        self.alert_enabled.setChecked(self.original.alert_enabled)
+        self.alert_sound = QLineEdit(self.original.alert_sound)
+        self.alert_sound.setPlaceholderText("Built-in ringtone")
+        self.alert_sound.setToolTip("A .wav file to play instead of the built-in ringtone")
+        browse = QPushButton("Choose…")
+        browse.clicked.connect(self._choose_sound)
+        builtin = QPushButton("Built-in")
+        builtin.clicked.connect(self.alert_sound.clear)
+        sound_row = QHBoxLayout()
+        sound_row.addWidget(self.alert_sound, 1)
+        sound_row.addWidget(browse)
+        sound_row.addWidget(builtin)
+        self.alert_repeats = QSpinBox()
+        self.alert_repeats.setRange(1, 50)
+        self.alert_repeats.setSuffix(" time(s)")
+        self.alert_repeats.setValue(max(1, self.original.alert_repeats))
+        self.alert_repeats.setToolTip("How many times the sound plays; the 🔔 Stop alarm button silences it early")
+        test = QPushButton("▶  Test sound")
+        test.clicked.connect(self._test_sound)
+        repeat_row = QHBoxLayout()
+        repeat_row.addWidget(self.alert_repeats)
+        repeat_row.addStretch(1)
+        repeat_row.addWidget(test)
+        alerts = QGroupBox("Alerts")
+        alerts_form = QFormLayout(alerts)
+        alerts_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        alerts_form.addRow("Alarm", self.alert_enabled)
+        alerts_form.addRow("Sound", sound_row)
+        alerts_form.addRow("Play", repeat_row)
+        alert_hint = QLabel("Every failure is also written to the Errors tab, with a screenshot.")
+        alert_hint.setObjectName("Muted")
+        alert_hint.setWordWrap(True)
+        alerts_form.addRow("", alert_hint)
+
         # ---- about
         about = QGroupBox("About")
         about_form = QFormLayout(about)
@@ -120,11 +158,37 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
 
+        content = QWidget()
+        sections = QVBoxLayout(content)
+        sections.setContentsMargins(0, 0, 0, 0)
+        for section in (automation, alerts, logs, about):
+            sections.addWidget(section)
+        sections.addStretch(1)
+        scroll = QScrollArea()  # small screens: scroll instead of hiding the Save button
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setWidget(content)
         layout = QVBoxLayout(self)
-        layout.addWidget(automation)
-        layout.addWidget(logs)
-        layout.addWidget(about)
+        layout.addWidget(scroll, 1)
         layout.addWidget(buttons)
+
+    def _choose_sound(self) -> None:
+        chosen, _ = QFileDialog.getOpenFileName(self, "Choose alarm sound", self.alert_sound.text(),
+                                                "WAV sounds (*.wav)")
+        if chosen:
+            self.alert_sound.setText(chosen)
+
+    def _test_sound(self) -> None:
+        alerter = getattr(self.manager, "alerter", None)
+        if alerter is None:
+            from core.alerts import Alerter
+
+            alerter = self._test_alerter = Alerter()
+        if alerter.ringing:
+            alerter.stop()
+            return
+        alerter.alert("Test sound", force=True, sound=self.alert_sound.text().strip(),
+                      repeats=min(self.alert_repeats.value(), 2))
 
     def _choose_log_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Choose log folder", self.log_dir.text())
@@ -134,10 +198,12 @@ class SettingsDialog(QDialog):
     def result_settings(self) -> app_settings.Settings:
         chosen = Path(self.log_dir.text())
         log_dir = "" if chosen == paths.default_logs_dir() else str(chosen)
-        return app_settings.Settings(default_timeout_seconds=self.timeout.value(), log_dir=log_dir,
-                                     appium_url=self.appium_url.text().strip(),
-                                     check_updates=self.check_updates.isChecked(),
-                                     skipped_version=self.original.skipped_version)
+        return dataclasses.replace(self.original, default_timeout_seconds=self.timeout.value(), log_dir=log_dir,
+                                   appium_url=self.appium_url.text().strip(),
+                                   check_updates=self.check_updates.isChecked(),
+                                   alert_enabled=self.alert_enabled.isChecked(),
+                                   alert_sound=self.alert_sound.text().strip(),
+                                   alert_repeats=self.alert_repeats.value())
 
     def _save(self) -> None:
         new = self.result_settings()
@@ -147,4 +213,7 @@ class SettingsDialog(QDialog):
             setup_logging(new.effective_log_dir())
         if self.manager is not None:
             self.manager.appium_url = new.appium_url or DEFAULT_APPIUM_URL
+        alerter = getattr(self.manager, "alerter", None)
+        if alerter is not None and not new.alert_enabled:
+            alerter.stop()
         self.accept()

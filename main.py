@@ -52,6 +52,7 @@ def cli_run(script_path: str, device_filter: str | None, roles: str | None, repe
     import time
 
     from core.devices import DeviceError, list_connected_devices
+    from core.errorlog import ErrorLog
     from core.manager import DeviceManager
     from core.runner import RunState, load_any_script, needs_role_mapping, roles_of
     from core.schema import ScriptError
@@ -61,7 +62,7 @@ def cli_run(script_path: str, device_filter: str | None, roles: str | None, repe
     except ScriptError as exc:
         print(exc)
         return 2
-    manager = DeviceManager(appium_url)
+    manager = DeviceManager(appium_url, error_log=ErrorLog())
     results = []
     manager.add_finished_listener(lambda serials, run_results: results.extend(run_results))
     try:
@@ -306,10 +307,13 @@ def run_gui(appium_url: str) -> int:
     splash.step("Checking the Appium server…", 35)
     server = ensure_appium(app, appium_url, splash)
     splash.step("Preparing the dashboard…", 60)
+    from core.alerts import Alerter
     from core.appium_server import AppiumWatchdog
+    from core.errorlog import ErrorLog
 
     watchdog = AppiumWatchdog(appium_url, server)
-    window = MainWindow(DeviceManager(appium_url), schedules=schedules, appium_watchdog=watchdog)
+    manager = DeviceManager(appium_url, error_log=ErrorLog(), alerter=Alerter())
+    window = MainWindow(manager, schedules=schedules, appium_watchdog=watchdog)
     splash.wait_until(lambda: window.scans_completed > 0, timeout=8, message="Scanning for phones…",
                       start=70, end=100)
     found = len(window.connected_devices())

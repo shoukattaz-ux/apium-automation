@@ -31,6 +31,25 @@ others.
   (`//*[@content-desc="Video"]/..`), positional paths are flagged as fragile,
   and recorded clicks keep a backup tap position.
 - **Repeat runs** — run N times or until stopped, with a pause between runs.
+- **Script Library** (Ctrl+L) — every script and group in one list: new, edit,
+  **duplicate**, rename and **delete**. Deleting moves the file to
+  `configs/deleted/` (move it back to undo) and warns first if a schedule or
+  group still uses it.
+- **Script groups** (Ctrl+G) — chain saved scripts (Script 1 → 2 → 3 …) and
+  pick the group on a phone like any script (also in Run…, Schedules and
+  `--run`). Per group: retries per script, **skip a failing script and go on**
+  (or stop the group), a **stuck limit** (a script still running after N
+  minutes is stopped, logged with a screenshot, then retried/skipped), a pause
+  between scripts, and whether to ring the alarm. A lost phone/Appium
+  connection is reopened before the next attempt. Groups are JSON files in
+  `configs/groups/`.
+- **Alarm** — when a script still fails after its retries, a ringtone plays
+  (built-in, or your own `.wav`; how many times is set in Settings, with a
+  Test button). **🔔 Stop alarm** in the status bar silences it.
+- **Errors / Stuck log** (Ctrl+E) — a separate **Errors** tab with one short
+  entry per problem: phone, group › script, the step, why, the attempts, and a
+  screenshot of the phone at that moment, plus a link to the full run report.
+  Stored in `logs/errors.jsonl` (stuck screenshots in `logs/error-shots/`).
 - **Schedules** — run scripts daily at set times on chosen weekdays, or every N
   minutes. Busy or unplugged phones are skipped and logged.
 - **Run reports** — every run saves a JSON and an HTML report, with a
@@ -60,6 +79,9 @@ others.
 | `core/schema.py` | The JSON script format: action specs (which drive the builder's forms), nested-block validation, roles, `{{variable}}` rendering. |
 | `core/runner.py` | `ScriptRunner` (blocks, retries, on-fail, roles, variables, reports), `run_repeatedly`, `run_script_on_devices`. |
 | `core/manager.py` | Session and run management: one run per phone, workflows reserve all their phones, repeats, finish hooks. |
+| `core/groups.py` | Script groups: the group file format, validation, saving. Groups run in `DeviceManager`. |
+| `core/errorlog.py`, `core/alerts.py` | The Errors / Stuck log (`logs/errors.jsonl`) and the alarm ringtone. |
+| `core/library.py` | Lists scripts and groups; duplicate, rename, safe delete, "who uses this script". |
 | `core/history.py` | Run recorder, JSON/HTML reports, failure screenshots, CSV export. |
 | `core/localfind.py`, `core/imagematch.py` | One layout snapshot per look for all locators; picture search and comparison. |
 | `core/targeting.py` | Safety checks: element fingerprint, screen signature, rejecting wrong or ambiguous matches. |
@@ -71,8 +93,9 @@ others.
 | `ui/dashboard.py` | Main window. |
 | `ui/script_editor.py` | Script Builder and Developer Mode. |
 | `ui/inspector.py`, `ui/run_dialog.py`, `ui/history.py`, `ui/schedules.py` | Element picker, Run dialog, History tab, Schedules. |
+| `ui/library_dialog.py`, `ui/errors_panel.py` | Script Library and group editor; Errors tab. |
 | `ui/settings_dialog.py`, `ui/splash.py`, `ui/errors.py`, `ui/theme.py` | Settings, splash screen, error dialog, app-wide theme. |
-| `configs/` | Saved scripts (`*.json`, `scripts/*.py`) and schedules, read at runtime. |
+| `configs/` | Saved scripts (`*.json`, `scripts/*.py`), groups (`groups/*.json`) and schedules, read at runtime. |
 | `packaging/` | PyInstaller spec, Inno Setup installer, icon generator, build and bundling scripts, end-user README. |
 
 User data (`configs/`, `logs/`, `runs/`, `settings.json`) lives next to the
