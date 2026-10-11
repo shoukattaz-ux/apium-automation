@@ -37,6 +37,7 @@ hiddenimports = (
     + collect_submodules("selenium.webdriver.remote")
     + collect_submodules("selenium.webdriver.common")
     + collect_submodules("selenium.webdriver.support")
+    + collect_submodules("pyaxmlparser") + collect_submodules("asn1crypto") + ["lxml.sax"]
     + ["urllib3", "urllib3.contrib.socks", "certifi", "websocket", "trio", "trio_websocket", "winsound", "wave"]
 )
 

@@ -16,11 +16,10 @@ from __future__ import annotations
 
 import copy
 import json
-import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from PySide6.QtCore import QObject, QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QFontDatabase, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
@@ -29,7 +28,6 @@ from PySide6.QtWidgets import (
 )
 
 from core import paths
-from core.devices import DeviceError, list_installed_packages
 from core.settings import default_timeout
 from core.schema import (
     ACTION_LABELS, ACTIONS, BLOCK_LABELS, COMMON_FIELDS, DEFAULT_TIMEOUT_SECONDS, LOCATOR_ACTIONS, LOCATOR_TYPES,
@@ -37,8 +35,8 @@ from core.schema import (
     safe_filename, save_script, script_roles, script_variables, validate_script, validate_step,
 )
 
+from .app_picker import PackagePickerDialog
 from .highlighter import PythonHighlighter
-from .qtutil import safe_emit
 
 if TYPE_CHECKING:
     from .dashboard import MainWindow
@@ -170,85 +168,6 @@ class LocatorListEditor(QWidget):
 
 
 # ======================================================================= helpers
-
-
-class _PackagesLoaded(QObject):
-    done = Signal(list, str)
-
-
-class PackagePickerDialog(QDialog):
-    """Lists apps installed on a connected phone so users needn't know package IDs."""
-
-    def __init__(self, devices: list[tuple[str, str]], parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Pick an app from a connected device")
-        self.resize(460, 520)
-        self.devices = devices
-        self._signals = _PackagesLoaded(self)
-        self._signals.done.connect(self._show_packages)
-        self._packages: list[str] = []
-
-        self.device_combo = QComboBox()
-        for serial, name in devices:
-            self.device_combo.addItem(f"{name} ({serial})", serial)
-        self.system_apps = QCheckBox("Include system apps")
-        self.filter = QLineEdit()
-        self.filter.setPlaceholderText("Filter, e.g. whatsapp")
-        self.list = QListWidget()
-        self.message = QLabel("")
-        self.message.setObjectName("Muted")
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        self.list.itemDoubleClicked.connect(lambda _: self.accept())
-
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.device_combo)
-        layout.addWidget(self.system_apps)
-        layout.addWidget(self.filter)
-        layout.addWidget(self.list, 1)
-        layout.addWidget(self.message)
-        layout.addWidget(buttons)
-
-        self.device_combo.currentIndexChanged.connect(self.load)
-        self.system_apps.toggled.connect(self.load)
-        self.filter.textChanged.connect(self._apply_filter)
-        if devices:
-            self.load()
-        else:
-            self.message.setText("No phones connected.")
-
-    def load(self) -> None:
-        serial = self.device_combo.currentData()
-        if not serial:
-            return
-        self.message.setText("Loading installed apps…")
-        self.list.clear()
-        third_party_only = not self.system_apps.isChecked()
-
-        def work() -> None:
-            try:
-                safe_emit(self._signals.done, list_installed_packages(serial, third_party_only), "")
-            except DeviceError as exc:
-                safe_emit(self._signals.done, [], str(exc))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _show_packages(self, packages: list, error: str) -> None:
-        self._packages = packages
-        self.message.setText(error or f"{len(packages)} apps")
-        self._apply_filter()
-
-    def _apply_filter(self) -> None:
-        needle = self.filter.text().strip().lower()
-        self.list.clear()
-        self.list.addItems([p for p in self._packages if needle in p.lower()])
-        if self.list.count():
-            self.list.setCurrentRow(0)
-
-    def selected_package(self) -> str | None:
-        item = self.list.currentItem()
-        return item.text() if item else None
 
 
 def _repolish(widget: QWidget) -> None:

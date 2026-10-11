@@ -30,6 +30,11 @@ others.
   using the app. Unlabelled buttons are found through a labelled child
   (`//*[@content-desc="Video"]/..`), positional paths are flagged as fragile,
   and recorded clicks keep a backup tap position.
+- **App picker** (Open/Close App steps → "from phone…") — installed apps with
+  their real names and icons (icon grid or list, search by name or package),
+  or **Tap on phone screen**: click the app's icon on a live picture of the
+  phone, it opens, and the app in front is picked. Names and icons are read
+  from the APKs on the phone over adb (only the few parts needed) and cached.
 - **Repeat runs** — run N times or until stopped, with a pause between runs.
 - **Script Library** (Ctrl+L) — every script and group in one list: new, edit,
   **duplicate**, rename and **delete**. Deleting moves the file to
@@ -81,6 +86,7 @@ others.
 | `core/manager.py` | Session and run management: one run per phone, workflows reserve all their phones, repeats, finish hooks. |
 | `core/groups.py` | Script groups: the group file format, validation, saving. Groups run in `DeviceManager`. |
 | `core/errorlog.py`, `core/alerts.py` | The Errors / Stuck log (`logs/errors.jsonl`) and the alarm ringtone. |
+| `core/apps.py`, `ui/app_picker.py` | App names and icons read from the phone's APKs, foreground app; the app picker and tap-on-phone picker. |
 | `core/library.py` | Lists scripts and groups; duplicate, rename, safe delete, "who uses this script". |
 | `core/history.py` | Run recorder, JSON/HTML reports, failure screenshots, CSV export. |
 | `core/localfind.py`, `core/imagematch.py` | One layout snapshot per look for all locators; picture search and comparison. |
