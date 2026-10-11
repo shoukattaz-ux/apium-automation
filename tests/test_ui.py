@@ -406,3 +406,18 @@ def test_groups_library_errors_tab_and_alarm(app, configs, window_factory, monke
     assert any((configs / "deleted").iterdir())
     library.list.setCurrentRow([e.name for e in library.entries].index("Ok"))
     assert "Group: Chain" in library.info.text()
+
+
+def test_step_dialog_survives_switching_actions_then_saving(app):
+    """Regression: Click → Open App → Save used a deleted backup-locator label and crashed."""
+    from core.schema import ACTIONS
+    from ui.script_editor import StepDialog
+
+    for first in ACTIONS:
+        for second in ("open_app", "wait", "click"):
+            dialog = StepDialog(None)
+            for action in (first, second):
+                dialog.action_combo.setCurrentIndex(dialog.action_combo.findData(action))
+                app.processEvents()
+                dialog._accept()  # may report missing fields, but must not crash
+            dialog.deleteLater()
