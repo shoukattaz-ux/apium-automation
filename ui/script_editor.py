@@ -196,6 +196,7 @@ class StepDialog(QDialog):
         self.errors: dict[str, QLabel] = {}
         self.result_step: dict | None = None
         self.alternatives: LocatorListEditor | None = None
+        self.alternatives_error: QLabel | None = None
         # Safety checks recorded by the element picker; kept across action changes.
         self.target: dict | None = (step or {}).get("target") or None
         self.screen_check: dict | None = (step or {}).get("screen") or None
@@ -228,8 +229,6 @@ class StepDialog(QDialog):
         for widget in (self.verify_box, self.verify_label, self.screen_box, self.screen_label):
             safety_layout.addWidget(widget)
         safety_layout.addLayout(agree_row)
-        self.alternatives_error = QLabel()
-        self.alternatives_error.setObjectName("Error")
 
         self.action_combo = QComboBox()
         group = None
@@ -310,7 +309,9 @@ class StepDialog(QDialog):
             if field_spec.name == "locator_value":
                 self._add_alternatives(step)
         if self.action() not in LOCATOR_ACTIONS:
+            # The backup-locator widgets were just deleted with the form rows: drop them too.
             self.alternatives = None
+            self.alternatives_error = None
         self.safety.setVisible(self.action() in LOCATOR_ACTIONS)
         self._show_safety()
         self.advanced.setVisible(spec.uses_device)
@@ -525,8 +526,9 @@ class StepDialog(QDialog):
             widget = self.inputs[name]
             widget.setProperty("invalid", "true" if message else "false")
             _repolish(widget)
-        self.alternatives_error.setText(problems.get("alternatives", ""))
-        self.alternatives_error.setVisible("alternatives" in problems)
+        if self.alternatives_error is not None:
+            self.alternatives_error.setText(problems.get("alternatives", ""))
+            self.alternatives_error.setVisible("alternatives" in problems)
         self.action_error.setText(problems.get("action", ""))
         self.action_error.setVisible("action" in problems)
         if problems:

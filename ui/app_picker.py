@@ -71,6 +71,7 @@ class AppPickerDialog(QDialog):
         self._signals.info.connect(self._apply_info)
         self._signals.progress.connect(self._show_progress)
         self._generation = 0
+        self._progress = 0
         self._closed = threading.Event()
         self._executor: ThreadPoolExecutor | None = None
         self.items: dict[str, QListWidgetItem] = {}
@@ -154,6 +155,7 @@ class AppPickerDialog(QDialog):
             return
         self._generation += 1
         generation = self._generation
+        self._progress = 0
         self.list.clear()
         self.items.clear()
         self.message.setText("Loading installed apps…")
@@ -228,8 +230,10 @@ class AppPickerDialog(QDialog):
         self._update_choice()
 
     def _show_progress(self, generation: int, done: int, total: int) -> None:
-        if generation != self._generation:
+        # Worker threads can report out of order (2/2 before 1/2): only ever move forward.
+        if generation != self._generation or done <= self._progress:
             return
+        self._progress = done
         self.message.setText(f"{total} apps" if done >= total else
                              f"{total} apps · reading names and icons {done}/{total}…")
         if done >= total:
