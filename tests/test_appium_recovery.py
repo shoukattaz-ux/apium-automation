@@ -28,7 +28,7 @@ def test_connection_problems_are_recognised_and_explained():
     assert connection_lost(MaxRetryError(REFUSED)) and connection_lost(RuntimeError(REFUSED))
     assert connection_lost(RuntimeError("Message: invalid session id: the session was deleted"))
     assert not connection_lost(RuntimeError("Element id=x not found within 3s"))
-    assert "Lost the connection to the Appium server" in friendly_error(RuntimeError(REFUSED))
+    assert "Lost the connection to the phone or the Appium server" in friendly_error(RuntimeError(REFUSED))
     assert friendly_error(RuntimeError("Message: no such element")) == "no such element"
 
 

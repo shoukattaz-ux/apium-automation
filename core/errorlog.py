@@ -30,6 +30,9 @@ STEP_FAILED = "step failed"        # a step failed and ended the script (on_fail
 SCRIPT_FAILED = "script failed"    # a script still failed after all its attempts (group)
 STUCK = "stuck"                    # a script ran past its time limit and was stopped
 CONNECTION = "connection"          # the phone or Appium connection was lost
+POPUP = "pop-up closed"            # a system pop-up blocked a step and was closed
+NO_REACTION = "no reaction"        # the app showed no change after a click (tapped twice)
+RECONNECTED = "reconnected"        # the phone dropped and was reconnected mid-run
 
 
 @dataclass

@@ -45,7 +45,7 @@ from typing import Any, Iterator
 
 LOCATOR_TYPES = ["id", "xpath", "accessibility id", "text", "class name", "android uiautomator", "image"]
 MAX_AGREE = 10
-_OMIT_DEFAULTS = {"scroll_search", "allow_large"}
+_OMIT_DEFAULTS = {"scroll_search", "allow_large", "no_reaction"}
 DIRECTIONS = ["up", "down", "left", "right"]
 KEYS = ["back", "home", "enter", "recent_apps", "delete", "search", "menu", "volume_up", "volume_down"]
 ON_FAIL = ["skip", "stop"]
@@ -117,6 +117,10 @@ ACTIONS: dict[str, ActionSpec] = {
                       help="Backup position (percent of screen) tapped when the element isn't found. "
                            "Filled in by the Element Picker; clear both to turn off."),
             FieldSpec("fallback_y", "If not found, tap at Y %", "float", required=False, minimum=0, maximum=100),
+            FieldSpec("no_reaction", "If the app doesn't react", "choice", required=False, default="continue",
+                      choices=("continue", "fail"),
+                      help="After a click the app checks the screen changed; if not, it taps once more. "
+                           "Still nothing: continue = carry on (logged), fail = the step fails (and is retried)."),
             FieldSpec("allow_large", "Allow tapping a large area", "bool", required=False, default=False,
                       help="A click taps the element's centre. On an element covering much of the screen (a whole "
                            "page or list) that is usually something else, so it is refused unless ticked."),

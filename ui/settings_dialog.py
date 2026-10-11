@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QComboBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from core import paths, settings as app_settings
@@ -90,6 +90,44 @@ class SettingsDialog(QDialog):
         open_row.addWidget(open_logs)
         logs_form.addRow("", open_row)
 
+        # ---- reliability
+        o = self.original
+        self.verify_clicks = QCheckBox("Check the app reacted to each click (tap once more if it plainly didn't)")
+        self.verify_clicks.setChecked(o.verify_clicks)
+        self.verify_clicks.setToolTip("After a click the screen must change (layout or picture). If nothing changed "
+                                      "at all, the tap is repeated once. A step can be set to fail instead.")
+        self.dismiss_popups = QCheckBox("Close system pop-ups that block a step")
+        self.dismiss_popups.setChecked(o.dismiss_popups)
+        self.dismiss_popups.setToolTip("“App isn't responding” (presses Wait), “keeps stopping”, system notices "
+                                       "(OK / Got it / Not now) and an open notification panel. Only when the "
+                                       "step can't find its element.")
+        self.popup_permissions = QComboBox()
+        for label, value in (("Leave them (don't touch)", "leave"), ("Allow (while using the app)", "allow"),
+                             ("Don't allow", "deny")):
+            self.popup_permissions.addItem(label, value)
+        self.popup_permissions.setCurrentIndex(max(0, self.popup_permissions.findData(o.popup_permissions)))
+        self.popup_buttons = QLineEdit(o.popup_buttons)
+        self.popup_buttons.setPlaceholderText("e.g. Not now, Skip, No thanks")
+        self.popup_buttons.setToolTip("Buttons (exact text, comma separated) to press in any app when they "
+                                      "block a step — e.g. an app's own rating or update prompt")
+        self.auto_recover = QCheckBox("Reconnect a phone that drops mid-run and repeat the step")
+        self.auto_recover.setChecked(o.auto_recover)
+        self.auto_recover.setToolTip("Waits up to 2 minutes for the phone: reconnects Wi-Fi phones, revives "
+                                     "offline ones and restarts adb if it stopped answering")
+        self.silent_typing = QCheckBox("Silent typing: fill fields without the keyboard (any language, emoji)")
+        self.silent_typing.setChecked(o.silent_typing)
+        self.silent_typing.setToolTip("Sets the text directly and checks it took; falls back to pasting, then to "
+                                      "normal typing, on fields that ignore it")
+        reliability_box = QGroupBox("Reliability")
+        reliability_form = QFormLayout(reliability_box)
+        reliability_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        reliability_form.addRow("Clicks", self.verify_clicks)
+        reliability_form.addRow("Pop-ups", self.dismiss_popups)
+        reliability_form.addRow("Permission prompts", self.popup_permissions)
+        reliability_form.addRow("Also press", self.popup_buttons)
+        reliability_form.addRow("Connection", self.auto_recover)
+        reliability_form.addRow("Typing", self.silent_typing)
+
         # ---- alerts
         self.alert_enabled = QCheckBox("Ring an alarm when a script still fails after its retries")
         self.alert_enabled.setChecked(self.original.alert_enabled)
@@ -161,7 +199,7 @@ class SettingsDialog(QDialog):
         content = QWidget()
         sections = QVBoxLayout(content)
         sections.setContentsMargins(0, 0, 0, 0)
-        for section in (automation, alerts, logs, about):
+        for section in (automation, reliability_box, alerts, logs, about):
             sections.addWidget(section)
         sections.addStretch(1)
         scroll = QScrollArea()  # small screens: scroll instead of hiding the Save button
@@ -203,7 +241,13 @@ class SettingsDialog(QDialog):
                                    check_updates=self.check_updates.isChecked(),
                                    alert_enabled=self.alert_enabled.isChecked(),
                                    alert_sound=self.alert_sound.text().strip(),
-                                   alert_repeats=self.alert_repeats.value())
+                                   alert_repeats=self.alert_repeats.value(),
+                                   verify_clicks=self.verify_clicks.isChecked(),
+                                   dismiss_popups=self.dismiss_popups.isChecked(),
+                                   popup_permissions=self.popup_permissions.currentData(),
+                                   popup_buttons=self.popup_buttons.text().strip(),
+                                   auto_recover=self.auto_recover.isChecked(),
+                                   silent_typing=self.silent_typing.isChecked())
 
     def _save(self) -> None:
         new = self.result_settings()

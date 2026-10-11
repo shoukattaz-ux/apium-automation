@@ -48,6 +48,20 @@ others.
   between scripts, and whether to ring the alarm. A lost phone/Appium
   connection is reopened before the next attempt. Groups are JSON files in
   `configs/groups/`.
+- **Reliability guards** (Settings → Reliability, all on by default):
+  - *Click check* — after a click the screen must change (layout, or the picture
+    for icon-only changes such as a "like"). If nothing changed at all, the tap
+    is repeated once; a step can be set to fail instead (`no_reaction: fail`).
+  - *Pop-up closing* — when a step can't find its element, blocking system
+    dialogs are closed: "isn't responding" (Wait), "keeps stopping", system
+    notices (OK / Got it / Not now…), an open notification panel; permission
+    prompts optionally (allow / deny); plus your own list of button texts.
+  - *Reconnect* — a phone that drops mid-run (cable, Wi-Fi, adb or Appium's helper
+    crashing) is brought back (Wi-Fi reconnect, offline revive, adb restart if adb
+    hangs, new Appium session) and the step is repeated, up to 3 times a run.
+  - *Silent typing* — text is set directly in the field (no keyboard; any language
+    or emoji) and read back; fields that ignore it get it pasted, then typed.
+  Each of these is written to the Errors tab.
 - **Alarm** — when a script still fails after its retries, a ringtone plays
   (built-in, or your own `.wav`; how many times is set in Settings, with a
   Test button). **🔔 Stop alarm** in the status bar silences it.
@@ -84,6 +98,7 @@ others.
 | `core/schema.py` | The JSON script format: action specs (which drive the builder's forms), nested-block validation, roles, `{{variable}}` rendering. |
 | `core/runner.py` | `ScriptRunner` (blocks, retries, on-fail, roles, variables, reports), `run_repeatedly`, `run_script_on_devices`. |
 | `core/manager.py` | Session and run management: one run per phone, workflows reserve all their phones, repeats, finish hooks. |
+| `core/reliability.py` | Click-reaction check, system pop-up recognition, bringing a dropped phone back. |
 | `core/groups.py` | Script groups: the group file format, validation, saving. Groups run in `DeviceManager`. |
 | `core/errorlog.py`, `core/alerts.py` | The Errors / Stuck log (`logs/errors.jsonl`) and the alarm ringtone. |
 | `core/apps.py`, `ui/app_picker.py` | App names and icons read from the phone's APKs, foreground app; the app picker and tap-on-phone picker. |
