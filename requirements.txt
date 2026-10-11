@@ -4,3 +4,4 @@ numpy>=1.26,<3
 Pillow>=10,<13
 lxml>=5,<7
 pytest>=8
+pyaxmlparser>=0.3.31,<0.4

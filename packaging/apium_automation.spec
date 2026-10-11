@@ -13,7 +13,7 @@
 import os
 import shutil
 
-from PyInstaller.utils.hooks import collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 APP = "DeviceAutomation"
@@ -37,6 +37,7 @@ hiddenimports = (
     + collect_submodules("selenium.webdriver.remote")
     + collect_submodules("selenium.webdriver.common")
     + collect_submodules("selenium.webdriver.support")
+    + collect_submodules("pyaxmlparser") + collect_submodules("asn1crypto") + ["lxml.sax"]
     + ["urllib3", "urllib3.contrib.socks", "certifi", "websocket", "trio", "trio_websocket", "winsound", "wave"]
 )
 
@@ -60,7 +61,8 @@ a = Analysis(
     # appium/version.py calls importlib.metadata.version("Appium-Python-Client") when it connects
     # to a phone; without the package metadata every connection fails. `main.py --self-test`
     # checks this in the built app.
-    + copy_metadata("Appium-Python-Client", recursive=True),
+    + copy_metadata("Appium-Python-Client", recursive=True)
+    + collect_data_files("pyaxmlparser"),  # resources/public.xml, read when an APK is parsed
     hiddenimports=hiddenimports,
     excludes=excludes,
     noarchive=False,

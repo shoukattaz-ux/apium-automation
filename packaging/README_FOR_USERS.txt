@@ -44,6 +44,11 @@ Wi-Fi instead of a cable (toolbar "Wi-Fi", or Devices > Wireless Devices, Ctrl+S
 Scripts
    - "New Script" opens the builder: add steps (open app, click, copy, paste,
      scroll, wait) with forms, then "Save Script".
+   - Open App / Close App steps: press "from phone..." to choose the app by
+     its name and icon (no package ID needed). Or press "Tap on phone
+     screen...", click the app's icon on the phone picture, then "Use this
+     app". The first time, names and icons take a little while to load;
+     after that they appear instantly.
    - Saved scripts are plain files in the "configs" folder next to the .exe.
      You can copy scripts between computers by copying that folder.
    - Script Library (toolbar "Library", or Ctrl+L): all your scripts and

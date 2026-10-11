@@ -191,7 +191,27 @@ def self_test() -> int:
     check("qt", qt)
     check("element_matching", element_matching)
     check("bundled_tools", bundled_tools)
+    def app_icons():
+        # App names/icons are read from APKs with pyaxmlparser: make sure it is bundled and works.
+        import io
+        import zipfile
+
+        import pyaxmlparser.axmlprinter
+        from core import apps
+        from PIL import Image
+
+        picture = io.BytesIO()
+        Image.new("RGBA", (192, 192), (200, 30, 30, 255)).save(picture, "PNG")
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as out:
+            out.writestr("res/icon.png", picture.getvalue())
+        png = apps._to_png(zipfile.ZipFile(archive).read("res/icon.png"))
+        if not png or Image.open(io.BytesIO(png)).size != (apps.ICON_SIZE, apps.ICON_SIZE):
+            raise RuntimeError("icon conversion failed")
+        return f"{pyaxmlparser.axmlprinter.__name__} ok"
+
     check("example_scripts", example_scripts)
+    check("app_icons", app_icons)
     report = json.dumps({"ok": ok, "version": APP_VERSION, "checks": results}, indent=2)
     (log.info if ok else log.error)("Self-test %s:\n%s", "passed" if ok else "FAILED", report)
     try:
