@@ -232,9 +232,16 @@ class InspectorWindow(QWidget):
                 button.clicked.connect(lambda _=False, a=action: self._add_step(a))
                 grid.addWidget(button)
             actions.addLayout(grid)
-        copy = QPushButton("Copy locator to clipboard")
-        copy.clicked.connect(self._copy_locator)
-        actions.addWidget(copy)
+        copy_row = QHBoxLayout()
+        copy = QPushButton("Copy all details to clipboard")
+        copy.setToolTip("The element's name, every attribute and every locator (best first), as text")
+        copy.clicked.connect(self._copy_details)
+        copy_one = QPushButton("Copy selected locator")
+        copy_one.setToolTip("Only the highlighted locator's value")
+        copy_one.clicked.connect(self._copy_locator)
+        copy_row.addWidget(copy, 2)
+        copy_row.addWidget(copy_one, 1)
+        actions.addLayout(copy_row)
 
         details = QFrame()
         details.setObjectName("Panel")
@@ -554,6 +561,31 @@ class InspectorWindow(QWidget):
                           "position": (position["fallback_x"], position["fallback_y"]) if position else None,
                           **self._safety_checks()})
             self.close()
+
+    def details_text(self) -> str:
+        """Everything shown about the selected element, as plain text."""
+        if not self.suggestions and self.table.rowCount() == 0:
+            return ""
+        lines = [self.title.text()]
+        if self.title.toolTip():
+            lines.append(self.title.toolTip())
+        lines += ["", "Attributes:"]
+        for row in range(self.table.rowCount()):
+            name, value = self.table.item(row, 0), self.table.item(row, 1)
+            lines.append(f"  {name.text() if name else ''}: {value.text() if value else ''}")
+        lines += ["", "Locators (best first):"]
+        for index in range(self.locators.count()):
+            lines.append(f"  {index + 1}. {self.locators.item(index).text()}")
+        return "\n".join(lines) + "\n"
+
+    def _copy_details(self) -> None:
+        text = self.details_text()
+        if text:
+            QGuiApplication.clipboard().setText(text)
+            self.status.setText(f"Copied all details ({self.table.rowCount()} attributes, "
+                                f"{self.locators.count()} locators)")
+        else:
+            self.status.setText("Select an element first")
 
     def _copy_locator(self) -> None:
         locator = self.current_locator()

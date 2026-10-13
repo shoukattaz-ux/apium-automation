@@ -149,6 +149,12 @@ def test_inspector_picks_and_records(app, configs, window_factory):
     inspector._click(100, 70)
     assert inspector.selected.text == "Order 1234"
     assert inspector.current_locator() == ("id", "com.shop:id/order")
+    inspector._copy_details()  # the whole details panel, not just one locator
+    from PySide6.QtGui import QGuiApplication
+    copied = QGuiApplication.clipboard().text()
+    assert copied.startswith(inspector.title.text()) and "text: Order 1234" in copied
+    assert "Locators (best first):" in copied and copied.count("  =  ") == inspector.locators.count()
+    assert "1. id  =  com.shop:id/order" in copied
     inspector.locators.setCurrentRow(inspector.locators.count() - 1)  # highlight the fragile full path
     inspector._add_step("click")
     fragile_pick = editor.builder.steps.pop()
